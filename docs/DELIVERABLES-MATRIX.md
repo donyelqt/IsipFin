@@ -50,6 +50,21 @@
 
 ## Submission checklist (T26)
 
+Prereq: `gh auth login -w -s repo` (once). Then, from the repo root:
+
+```bash
+# 1. Create the PRIVATE repo and push main  (repo does not exist yet — 404 verified 2026-10-13)
+gh repo create IsipFin --private --source=. --remote=origin --push
+
+# 2. Add the three reviewers from the brief with push access
+gh api -X PUT repos/donyelqt/IsipFin/collaborators/crcheng   -f permission=push
+gh api -X PUT repos/donyelqt/IsipFin/collaborators/levymedina -f permission=push
+gh api -X PUT repos/donyelqt/IsipFin/collaborators/jgcosme   -f permission=push
+```
+
+Guard before every push — nothing runtime-related may be tracked:
+`git ls-files | grep -E '^(data/|\.env$|.*\.pdf$)'` must return **nothing**.
+
 - [ ] Private GitHub repository
 - [ ] Collaborators added: `crcheng`, `levymedina`, `jgcosme`
 - [ ] Code + diagrams + text files pushed (no `data/`, no `.env`, no PDFs)
