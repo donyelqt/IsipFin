@@ -34,8 +34,8 @@ becoming irrelevant. The core (cited financial QA) still solves a real, graded p
 ### Pressure source
 
 - [x] **Supply/cost-side** — the 46-hour clock and the doc-to-code ratio. `docs/STRESS-TEST-DELIVERY.md`'s kill-switch list exists precisely because of this pressure
-- [ ] Demand-side — needs have not shifted; the brief is the same brief
-- [ ] Capability-side — the architecture is not at its limit; it has never been built
+- [x] Demand-side — ruled out: needs have not shifted; the brief is the same brief
+- [x] Capability-side — ruled out: the architecture is not at its limit; it has never been built
 
 **Primary pressure: supply/cost-side.** Say it out loud, per the skill's trap warning: this is
 *"our costs are bad,"* not *"the customer's need changed."* Success looks like a complete Must

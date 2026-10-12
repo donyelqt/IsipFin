@@ -5,8 +5,8 @@
 
 ## Phase 1 — Foundation: `doc-ingest` + `chunking-index`
 
-- [ ] T1. Repo scaffold: `src/` tree, pinned `requirements.txt`, `.env.example`, `.gitignore` (`data/`, `*.pdf`, `.env`), pytest/ruff/black config
-- [ ] T2. `doc-ingest`: pypdf text, pdfplumber markdown tables, cleaning rules, section detection, `Block`/`ParsedDocument`, sha256 idempotency, `text_layer: false` warnings
+- [x] T1. Repo scaffold: `src/` tree, pinned `requirements.txt`, `.env.example`, `.gitignore` (`data/`, `*.pdf`, `.env`), pytest/ruff/black config — **merged via PR #1** (`6f66663`). Verified: `pip check` clean, all 14 pins installed at pinned versions, all 14 imports work, faiss 1.15.1 runs a real `IndexFlatIP` search, `pytest -q` exit 0, ruff + black clean, floor guard exit 0 and mutation-tested. Python 3.11 pinned at three levels (`.python-version`, `requires-python ==3.11.*`, `python:3.11-slim` in the Dockerfile spec).
+- [x] T2. `doc-ingest`: pypdf text, pdfplumber markdown tables, cleaning rules, section detection, `Block`/`ParsedDocument`, sha256 idempotency, `text_layer: false` warnings — **merged via PR #3** (`fa9f9cf`). Verified: 25 pytest passed; ruff + black + mypy clean; floor guard exit 0. APIs checked against official docs (pypdf `PdfReader`/`extract_text`, pdfplumber `extract_tables`/`.page_number` 1-based). Suite mutation-tested — the run exposed a real hole (page-number stripping unasserted, regex missing `re.MULTILINE`), now fixed and guarded.
 - [ ] T3. `chunking-index`: heading-aligned parents (~1000 tok), children (~250/50), atomic tables, page ranges
 - [ ] T4. Index build + hybrid retrieval: FAISS children, BM25 pickle, `chunks.jsonl` truth, RRF k=60, parent expansion, `retrieve(query, k, filters)`
 - [ ] T5. `scripts/download_corpus.py`, `scripts/build_index.py`, `docs.jsonl` catalog

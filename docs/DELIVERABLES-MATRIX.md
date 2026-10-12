@@ -65,10 +65,10 @@ gh api -X PUT repos/donyelqt/IsipFin/collaborators/jgcosme   -f permission=push
 Guard before every push — nothing runtime-related may be tracked:
 `git ls-files | grep -E '^(data/|\.env$|.*\.pdf$)'` must return **nothing**.
 
-- [ ] Private GitHub repository
-- [ ] Collaborators added: `crcheng`, `levymedina`, `jgcosme`
-- [ ] Code + diagrams + text files pushed (no `data/`, no `.env`, no PDFs)
+- [x] Private GitHub repository — `donyelqt/IsipFin`, private, default branch `main`
+- [ ] Collaborators added: `crcheng`, `levymedina`, `jgcosme` — **not yet** (commands staged in §T26 above; do at submission)
+- [x] Code + diagrams + text files pushed (no `data/`, no `.env`, no PDFs) — `git ls-files | grep -E '^(data/|\.env$|.*\.pdf$)'` returns nothing
 - [ ] Backup copy uploaded to the shared Google Drive folder
-- [ ] CI green on the final commit
+- [ ] CI green on the final commit — CI not built yet (T23); gates run locally: ruff/black/pytest/floor-guard all green
 - [ ] Demo script (from `docs/STRESS-TEST-DELIVERY.md`) run green the same day
 - [ ] Journal §6 filled with real measured numbers
