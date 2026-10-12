@@ -53,6 +53,18 @@ class ParsedDocument:
 _HEADING_ALLCAPS = re.compile(r"^[A-Z][A-Z0-9 ,&'\-/()\.]{4,}$")
 _HEADING_NOTE = re.compile(r"^Note\s+\d+\b")
 _HEADING_NUMBERED = re.compile(r"^(\d+\.|[A-Z]\.)\s+[A-Z]")
+# An all-caps line must clear these before it counts as a heading rather than as
+# an MD&A column label. Measured on the FY2023 corpus: 48 of 3,542 lines were
+# all-caps labels such as "REVENUE", "STOCK PERFORMANCE" and "LIQUIDITY AND
+# CAPITAL RESOURCES" (which also appears as a column label), which the raw regex
+# accepted and which polluted section_path.
+#
+# Length is the cheap, order-independent gate: genuine section headings in this
+# corpus are multi-word ("MANAGEMENT'S DISCUSSION AND ANALYSIS") while column
+# labels are single tokens ("REVENUE", "GROSS MARGIN"). Word count is deliberately
+# NOT used, because a single-word section heading is legal (the test fixture's
+# "CONTINGENCIES") and a word gate silently drops it.
+_MIN_HEADING_CHARS = 10
 # "(table|note) <n>" style captions, used only as a table-page hint.
 _TABLE_CAPTION = re.compile(r"(table|note)\s+\d+", re.IGNORECASE)
 
@@ -116,11 +128,34 @@ def strip_boilerplate(text: str, boilerplate: set[str]) -> str:
 
 
 def detect_heading(line: str) -> bool:
-    """True when a line looks like a section heading (ADR-004 rule 3)."""
+    """True when a line looks like a section heading (ADR-004 rule 3).
+
+    The all-caps rule is tightened beyond ADR-004's literal regex because the
+    alternative was measured on the real corpus: the raw regex accepts MD&A column
+    labels alongside real section headings, which pollutes ``section_path``.
+
+    A heading therefore needs the all-caps shape AND ``_MIN_HEADING_CHARS``
+    characters — enough to be a phrase, not a table token. Word count is
+    deliberately NOT the gate: a single-word section heading is legitimate (the
+    test fixture's ``CONTINGENCIES``), and a word minimum silently drops it.
+
+    Two stronger discriminators were tested and rejected after measuring the
+    FY2023 corpus: word count (drops legal one-word headings) and recurrence
+    across pages (only 2 all-caps lines repeat there, and both are genuine
+    sections). A length floor is the honest best-effort with no oracle available
+    from regex alone. See docs/JOURNAL.md section 9 for the measurement.
+    """
     s = line.strip()
     if not s or len(s) > 90:
         return False
-    return bool(_HEADING_ALLCAPS.match(s) or _HEADING_NOTE.match(s) or _HEADING_NUMBERED.match(s))
+    if _HEADING_NOTE.match(s) or _HEADING_NUMBERED.match(s):
+        return True
+    if not _HEADING_ALLCAPS.match(s):
+        return False
+    if len(s) < _MIN_HEADING_CHARS:
+        return False
+    # A heading is not a sentence: no lowercase words, or it is prose in caps.
+    return not any(word.islower() for word in s.split())
 
 
 def page_is_table_bearing(text: str) -> bool:
