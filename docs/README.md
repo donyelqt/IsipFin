@@ -1,6 +1,6 @@
 # Docs Index
 
-> Planning documentation for the Thinking Machines GenAI Engineer take-home: **FinDoc Assistant**
+> Planning documentation for the Thinking Machines GenAI Engineer take-home: **IsipFin**
 > — a Streamlit chatbot answering financial-PDF questions (reference corpus: Microsoft FY2023
 > Annual Report) with cited answers, on a LangGraph hybrid-RAG pipeline.
 

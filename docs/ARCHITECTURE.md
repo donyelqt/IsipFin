@@ -1,4 +1,4 @@
-# Architecture: FinDoc Assistant
+# Architecture: IsipFin
 
 > Design contract. Node names, state fields, table names, and file paths below are **load-bearing**:
 > ADRs, `docs/PLAN.md`, `docs/prompts/`, and `docs/REPO-STRUCTURE.md` reference them verbatim.

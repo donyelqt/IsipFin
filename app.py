@@ -1,4 +1,4 @@
-"""FinDoc Assistant — Streamlit entrypoint.
+"""IsipFin — Streamlit entrypoint.
 
 UI-only shell (ADR-009): no retrieval, prompt, or gateway logic lives here or in
 src/components/. The UI calls orchestration.invoke() and renders AnswerEnvelope
@@ -14,7 +14,7 @@ def main() -> None:
     # Placeholder body. T18 replaces this with the chat shell, upload widget and
     # empty state; the acceptance gate is the 6-step demo script in
     # docs/STRESS-TEST-DELIVERY.md.
-    print("FinDoc Assistant — UI not yet built (T18-T21). See docs/PLAN.md phase 4.")
+    print("IsipFin — UI not yet built (T18-T21). See docs/PLAN.md phase 4.")
 
 
 if __name__ == "__main__":
