@@ -52,6 +52,7 @@ DOC_ID_CHARS = 12
 MOCK_ENV = "MOCK_LLM"
 API_KEY_ENV = "OPENAI_API_KEY"
 BASE_URL_ENV = "OPENAI_BASE_URL"
+EMBEDDING_BASE_URL_ENV = "EMBEDDING_BASE_URL"
 EMBEDDING_MODEL_ENV = "EMBEDDING_MODEL"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -180,7 +181,14 @@ def build_embedder() -> tuple[Embedder, str]:
             f"{EMBEDDING_MODEL_ENV}), or run with {MOCK_ENV}=1 for the deterministic "
             "offline path that needs no key and no network."
         )
-    base_url = os.environ.get(BASE_URL_ENV, "").strip() or None
+    # Embeddings may live on a different provider than chat: Groq serves chat only
+    # and has no /embeddings endpoint, so EMBEDDING_BASE_URL (falling back to the
+    # chat base URL) keeps the two independently configurable.
+    base_url = (
+        os.environ.get(EMBEDDING_BASE_URL_ENV, "").strip()
+        or os.environ.get(BASE_URL_ENV, "").strip()
+        or None
+    )
     model = os.environ.get(EMBEDDING_MODEL_ENV, "").strip() or DEFAULT_EMBEDDING_MODEL
     try:
         embedder: Embedder = OpenAIEmbedder(api_key=api_key, base_url=base_url, model=model)

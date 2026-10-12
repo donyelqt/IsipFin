@@ -1,0 +1,78 @@
+{
+  "P1": {
+    "node": "analyze_question",
+    "min_version": "1.0.0",
+    "structured": true,
+    "output_schema": "QueryPlan",
+    "temperature": 0.0
+  },
+  "P2": {
+    "node": "contextualize_question",
+    "min_version": "1.0.0",
+    "structured": false,
+    "output_schema": "plain text — one standalone question",
+    "temperature": 0.0
+  },
+  "P3": {
+    "node": "synthesize_answer",
+    "min_version": "1.0.0",
+    "structured": false,
+    "output_schema": "markdown text with [n] citation markers",
+    "temperature": 0.2
+  },
+  "P4": {
+    "node": null,
+    "min_version": "1.0.0",
+    "structured": false,
+    "output_schema": "markdown (tables + prose)",
+    "temperature": null,
+    "appended_to": ["P3", "P5"],
+    "note": "Formatting contract appended to P3 (synthesis) and P5 (summary mode); no LLM node of its own — 'node' is null because it is never invoked standalone."
+  },
+  "P5": {
+    "node": "groundedness_check",
+    "min_version": "1.0.0",
+    "structured": true,
+    "output_schema": "GroundingResult",
+    "temperature": 0.0
+  },
+  "nodes": {
+    "analyze_question": {
+      "prompt_id": "P1",
+      "min_version": "1.0.0",
+      "structured": true,
+      "output_schema": "QueryPlan",
+      "schema_module": "src/chains/schemas.py",
+      "temperature": 0.0,
+      "on_failure": "retry once with stricter nudge, else classify out_of_scope + planner_degraded flag"
+    },
+    "contextualize_question": {
+      "prompt_id": "P2",
+      "min_version": "1.0.0",
+      "structured": false,
+      "output_schema": "plain text — one standalone question",
+      "temperature": 0.0,
+      "on_failure": "degrade to the raw question, log contextualization_failed; the turn survives"
+    },
+    "synthesize_answer": {
+      "prompt_id": "P3",
+      "min_version": "1.0.0",
+      "structured": false,
+      "output_schema": "markdown text with [n] citation markers",
+      "temperature": 0.2,
+      "appends": ["P4"],
+      "on_failure": "typed error -> visible error banner, never an empty answer"
+    },
+    "groundedness_check": {
+      "prompt_id": "P5",
+      "min_version": "1.0.0",
+      "structured": true,
+      "output_schema": "GroundingResult",
+      "schema_module": "src/chains/schemas.py",
+      "temperature": 0.0,
+      "appends": ["P4"],
+      "on_failure": "pessimistic default: treat the answer as ungrounded and trim claims"
+    }
+  },
+  "$comment": "Prompt metadata contract (T8). Per prompt id: the minimum version the T9-T15 graph nodes require ('min_version'), the graph node that consumes it ('node'), and whether that node requests a structured (JSON-schema) output ('structured'). src/utils/prompts.py:required_version(id)/assert_min_version(id) enforce the floor; src/utils/mock_llm.py keys its scripted responses on this file's node names and structured flags instead of hardcoding them (ADR-005 scripted mode: 'prompt fingerprint (node name + schema presence)'). Temperatures mirror the per-task parameter policy in docs/adr/ADR-005-llm-gateway-and-params.md. P4 has no node of its own — it is an appendix to P3/P5."
+}
