@@ -15,6 +15,7 @@ python-dotenv==1.2.4
 # --- dev (tools, not shipped) ---
 pytest==9.1.1
 pytest-cov==7.1.0
+reportlab==5.0.1    # test fixtures only: generates deterministic PDFs in-memory
 ruff==0.17.0
 black==26.10.1
-mypy==2.4.0             # scoped to src/utils + src/chains (docs/CONSTRAINTS.md)
+mypy==2.4.0          # scoped to src/utils + src/chains (docs/CONSTRAINTS.md)
