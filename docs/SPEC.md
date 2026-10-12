@@ -1,4 +1,4 @@
-# Spec: FinDoc Assistant — Financial PDF RAG Chatbot (TM GenAI Take-Home)
+# Spec: IsipFin — Financial PDF RAG Chatbot (TM GenAI Take-Home)
 
 > Implementation-ready specification. Module ids and interface contracts come from
 > `docs/CAPABILITY-MAP.md`; this document freezes them. ADRs, the plan, the task list, and the

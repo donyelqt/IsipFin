@@ -1,4 +1,4 @@
-# Implementation Plan: FinDoc Assistant
+# Implementation Plan: IsipFin
 
 > Per-module tasks in dependency order. Task ids (`T1`…`T26`) are referenced by
 > `docs/TODO.md` and `docs/TIMELINE.md`. Interfaces frozen in `docs/SPEC.md` §9; build order

@@ -27,7 +27,7 @@ Every row names the command that produces the verdict. A dimension with a number
 | Floor guard | Zero hits | `python scripts/check_floor.py --diff` | task end |
 | Golden QA | Zero golden regressions; wrong-year contamination = 0 | `python scripts/eval_rag.py` | before every checkpoint gate |
 | Demo | 6-step demo script green | manual run, journal §6 records the date | before submission |
-| Docker | Image builds | `docker build -t findoc-assistant .` | CI, before submission |
+| Docker | Image builds | `docker build -t isipfin .` | CI, before submission |
 
 ## Measured, not yet enforced
 

@@ -1,4 +1,4 @@
-# Project Journal — FinDoc Assistant
+# Project Journal — IsipFin
 
 > **Purpose and honesty note.** This journal is the exam's weighted deliverable. It is written
 > *before* implementation as a decision record, and each section marks what is settled now

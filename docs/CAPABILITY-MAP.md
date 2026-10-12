@@ -1,4 +1,4 @@
-# Capability Map: FinDoc Assistant (TM GenAI Take-Home)
+# Capability Map: IsipFin (TM GenAI Take-Home)
 
 > Phase 0 artifact of the spec-driven workflow. Every later document (spec, architecture, ADRs,
 > plan, task list) selects work by the `module id` below. Ids are stable — rename only by
