@@ -148,16 +148,19 @@ def table_to_markdown(table: _Table) -> str:
     """Serialize a pdfplumber grid to a markdown table with an explicit header.
 
     ADR-004 rule 5: the header row travels with the table, because detached
-    numeric rows are unreadable to the LLM. Empty cells become "—" so column
-    count is preserved and the grid does not silently shift.
+    numeric rows are unreadable to the LLM. Trailing all-empty rows (a common
+    pdfplumber artifact where the last rule sits below the final text baseline)
+    are dropped rather than rendered as a row of em-dashes. Empty cells become
+    "—" so column count is preserved and the grid does not silently shift.
     """
     if not table:
         return ""
-    width = max(len(row) for row in table)
-    normalized = []
-    for row in table:
-        cells = [(cell or "").strip() or "—" for cell in row]
-        normalized.append(cells + ["—"] * (width - len(cells)))
+    rows = [[(cell or "").strip() for cell in row] for row in table]
+    rows = [row for row in rows if any(cell for cell in row)]
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized = [[cell or "—" for cell in row] + ["—"] * (width - len(row)) for row in rows]
     header, *body = normalized
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * width) + "|"]
     lines.extend("| " + " | ".join(row) + " |" for row in body)
