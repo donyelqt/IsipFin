@@ -41,7 +41,14 @@ def _decorate(pdf: io.BytesIO, pages: list[list[str]]) -> None:
 
 
 def _draw_table(c: canvas.Canvas, top: float) -> None:
-    """Draw a ruled 3-column table so pdfplumber's 'lines' strategy finds it."""
+    """Draw a ruled 3-column table so pdfplumber's 'lines' strategy finds it.
+
+    Text baselines sit just *below* each horizontal rule. pdfplumber's line-based
+    strategy binds characters to the cell whose rules enclose them, so a header
+    drawn exactly on the top rule falls outside the detected grid and is silently
+    lost — which is how a table ends up with its first data row promoted to the
+    header row.
+    """
     rows = [
         ("Metric", "FY2023", "FY2022"),
         ("Revenue", "$ 211,915", "$ 198,270"),
@@ -49,7 +56,7 @@ def _draw_table(c: canvas.Canvas, top: float) -> None:
     ]
     x0, col_w, row_h = 0.75 * inch, 1.6 * inch, 0.22 * inch
     for r, row in enumerate(rows):
-        y = top - r * row_h
+        y = top - (r + 1) * row_h + 0.05 * inch
         for cidx, cell in enumerate(row):
             c.drawString(x0 + cidx * col_w + 0.05 * inch, y, cell)
     # Rulings are what pdfplumber needs to detect cells.

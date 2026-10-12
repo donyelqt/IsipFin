@@ -5,6 +5,7 @@
 streamlit==1.65.0
 langgraph==1.2.14
 langchain-core==1.6.10  # floor >=1.4.7 declared by langgraph 1.2.14; latest verified
+langchain-text-splitters==1.1.3  # direct dep (ADR-002 chunking); not declared by langgraph
 openai==3.29.0
 faiss-cpu==1.15.1       # cp311 wheels confirmed
 rank-bm25==0.2.2

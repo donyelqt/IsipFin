@@ -204,11 +204,16 @@ From `docs/STRESS-TEST-DELIVERY.md` kill-switch list — scoping judgment is a g
 
 1. Scanned/image PDFs: text-layer absence is flagged per page and surfaced in the UI, but
    quality on such uploads is not guaranteed — noted rather than promised away.
-2. Multi-column PDF sections: header/footer stripping + blank-line splitting produces partially
+2. **Table text appears twice per table page**: as a markdown table block *and* inside the
+   flat text block, because pypdf exposes no coordinates to subtract the table region with.
+   The consequence is minor (retrieval may match either form; synthesis sees the markdown
+   form first) but it is a real duplication, and it was a deliberate trade against adding a
+   layout-analysis dependency. Accepted per ADR-004; documented rather than hidden.
+3. Multi-column PDF sections: header/footer stripping + blank-line splitting produces partially
    ordered text in worst cases; still retrievable.
-3. Retrieval fusion (RRF) is untuned against a reranker; the golden set is the tuning signal.
-4. SQLite single-writer: fine for the demo; the Postgres swap path is documented, not built.
-5. Scale story is vertical only; extracting the graph behind an API is the documented next
+4. Retrieval fusion (RRF) is untuned against a reranker; the golden set is the tuning signal.
+5. SQLite single-writer: fine for the demo; the Postgres swap path is documented, not built.
+6. Scale story is vertical only; extracting the graph behind an API is the documented next
    step, deliberately not built inside the exam window.
 
 ## 10. How to verify my claims (reviewer path)
