@@ -1,0 +1,59 @@
+# Task List
+
+> Flat checklist. Task ids match `docs/PLAN.md`. Check off only after the task's verification
+> ran — never from inspection.
+
+## Phase 1 — Foundation: `doc-ingest` + `chunking-index`
+
+- [ ] T1. Repo scaffold: `src/` tree, pinned `requirements.txt`, `.env.example`, `.gitignore` (`data/`, `*.pdf`, `.env`), pytest/ruff/black config
+- [ ] T2. `doc-ingest`: pypdf text, pdfplumber markdown tables, cleaning rules, section detection, `Block`/`ParsedDocument`, sha256 idempotency, `text_layer: false` warnings
+- [ ] T3. `chunking-index`: heading-aligned parents (~1000 tok), children (~250/50), atomic tables, page ranges
+- [ ] T4. Index build + hybrid retrieval: FAISS children, BM25 pickle, `chunks.jsonl` truth, RRF k=60, parent expansion, `retrieve(query, k, filters)`
+- [ ] T5. `scripts/download_corpus.py`, `scripts/build_index.py`, `docs.jsonl` catalog
+
+**Checkpoint 1:** cold-clone index build; 10-query retrieval probe sane; `pytest -q` green; ruff clean.
+
+## Phase 2 — `llm-gateway` + `chat-store` (parallel)
+
+- [ ] T6. `llm-gateway`: `build_llm(params)`, OpenAI-compatible client, JSON-schema outputs, retry/backoff, typed errors, `MOCK_LLM=1` scripted mode, token/latency accounting
+- [ ] T7. `chat-store`: 6-table SQLite schema, accessors, session lifecycle, WAL
+- [ ] T8. Prompt assets in `prompts/` with version headers (5 prompts)
+
+## Phase 3 — `orchestration` (serial, highest risk)
+
+- [ ] T9. `GraphState`, node skeletons with `@trace_node`, error mapping into `node_trace`
+- [ ] T10. `analyze_question`: classification, `required_sections`, `missing_aspect`, JSON schema
+- [ ] T10b. `decompose_question`: sub-query fan-out (cap 4), retrieval pass per sub-query
+- [ ] T11. `hybrid_retrieve` node: routing, score gate `tau`, one rewrite retry, context budget packing
+- [ ] T12. `synthesize_answer`: citation-constrained synthesis, year-aware extraction contract
+- [ ] T13. `groundedness_check`: per-claim span verification, trim-and-flag
+- [ ] T14. `contextualize_question`: 6-turn history + `cited_pages`, graceful degradation
+- [ ] T15. `refuse`: honest refusals, coverage-naming copy
+- [ ] T16. Graph wiring: edges + conditional routing, `recursion_limit`, params flow
+- [ ] T17. Golden QA harness `scripts/eval_rag.py` + dataset
+
+**Checkpoint 2:** `docs/SPEC.md` §10 criteria pass end-to-end (mock minimum); golden baseline recorded; `pytest -q` green.
+
+## Phase 4 — `app-ui`
+
+- [ ] T18. `app.py` shell: chat pane, multi-PDF upload, empty state
+- [ ] T19. Sidebar: model params, session manager
+- [ ] T20. Debug panel: node_trace, query_plan, retrieval scores (current + historical)
+- [ ] T21. Error surfacing: banners per error class, per-file upload errors, ungrounded markers
+
+**Checkpoint 3:** demo script green locally, real + mock modes.
+
+## Phase 5 — `packaging`
+
+- [ ] T22. `Dockerfile` (multi-stage, non-root, healthcheck) + `docker-compose.yml` (data volume, env passthrough)
+- [ ] T23. CI: ruff + black + pytest + docker build smoke
+- [ ] T24. `README.md`: 4-command quick start, mock mode, architecture, journal pointer
+
+**Checkpoint 4:** CI green; cold-clone reproduction green; rebuild keeps data.
+
+## Phase 6 — Journal + submission
+
+- [ ] T25. `JOURNAL.md`: ADR-linked decisions, measured build data, prompt iteration, vector-vs-vectorless section, cut-list, AI-use disclosure
+- [ ] T26. Submission: private repo, three collaborators, final demo-script + CI gate
+
+**Checkpoint 5 (final):** every Must item in `docs/SPEC.md` §8 demonstrably green; demo script passes; CI green; journal complete with measured data.
