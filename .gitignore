@@ -3,6 +3,11 @@
 
 # Runtime state — never commit (mounted as a compose volume)
 data/
+# Test fixtures under tests/data/ ARE committed: the golden-QA dataset the eval
+# harness reads. Without this negation the `data/` rule above swallows it and a
+# fresh clone cannot run scripts/eval_rag.py at all.
+!tests/data/
+!tests/data/**
 *.pdf
 
 # Python
