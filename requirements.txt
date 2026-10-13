@@ -1,6 +1,13 @@
 # Application dependencies — every version below was read off PyPI on 2026-10-13.
 # Verification record and re-verification protocol: docs/DEPENDENCY-PINS.md.
 # Every pin is ==. An unpinned or guessed row is a finding, not a convenience.
+#
+# This file is the runtime pin-of-record: the Docker builder stage installs exactly these
+# rows, and they are the only ones that reach the image. The toolchain that runs tests and
+# gates but never ships with the app (pytest, pytest-cov, ruff, black, mypy, and the
+# reportlab test-fixture generator) lives in requirements-dev.txt, which installs this file
+# first — so a version number appears in exactly one place. No runtime module imports any
+# of them (verified: no `import pytest|ruff|black|mypy|reportlab` outside tests/).
 
 streamlit==1.65.0
 langgraph==1.2.14
@@ -13,11 +20,3 @@ rank-bm25==0.2.2
 pypdf==6.20.1
 pdfplumber==0.11.10
 python-dotenv==1.2.4
-
-# --- dev (tools, not shipped) ---
-pytest==9.1.1
-pytest-cov==7.1.0
-reportlab==5.0.1    # test fixtures only: generates deterministic PDFs in-memory
-ruff==0.17.0
-black==26.10.1
-mypy==2.4.0          # scoped to src/utils + src/chains (docs/CONSTRAINTS.md)

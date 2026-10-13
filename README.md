@@ -265,7 +265,8 @@ isipfin/
 ├── data/                   # runtime state (gitignored): pdfs/, index/, chat.sqlite3
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt        # every pin is ==
+├── requirements.txt        # runtime pins (the only ones the image installs)
+├── requirements-dev.txt    # toolchain: pytest/ruff/black/mypy + fixtures; not shipped
 ├── pyproject.toml          # ruff / black / mypy / pytest config
 ├── .env.example
 └── README.md
@@ -297,6 +298,20 @@ PowerShell set `$env:MOCK_LLM=1` on its own line first.
 
 `pytest -q` is hermetic by contract: no test opens a socket, reads `.env`, or writes into
 the repo tree — which is also why CI provides no `OPENAI_API_KEY` and still passes.
+Install it with `pip install -r requirements-dev.txt` (that file pulls `requirements.txt`
+first, so the runtime pins stay in one place). The image deliberately carries no toolchain,
+so inside the container it installs to a scratch directory — the venv ships read-only as
+part of the non-root runtime:
+
+```bash
+docker compose exec app sh -c \
+  "pip install -q --target=/tmp/devtools -r requirements-dev.txt && \
+   PYTHONPATH=/app:/tmp/devtools /tmp/devtools/bin/pytest -q"
+```
+
+(`requirements-dev.txt` is in the image for exactly this: the runtime pins are never
+installed into the image, so nothing but the app's own dependencies ships.)
+
 `scripts/eval_rag.py` is deliberately **not** a pytest module: it runs golden questions end
 to end through the real `invoke()` over the persisted index and exits nonzero on a
 regression (it needs the index built, and a real key for the real-LLM mode).
