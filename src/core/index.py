@@ -38,6 +38,7 @@ import shutil
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import faiss
 import numpy as np
@@ -99,7 +100,7 @@ class ChunkRecord:
     doc_id: str
     ordinal: int
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """JSON-ready mapping; ``section_path`` serializes as a list per the contract."""
         return {
             "chunk_id": self.chunk_id,
@@ -113,7 +114,7 @@ class ChunkRecord:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict, source: str) -> ChunkRecord:
+    def from_dict(cls, payload: dict[str, Any], source: str) -> ChunkRecord:
         """Rebuild a record from one JSONL line, failing loudly on a malformed one."""
         missing = [field for field in _REQUIRED_FIELDS if field not in payload]
         if missing:
@@ -426,13 +427,15 @@ class ChunkIndex:
                 kept_rows.append(self._vectors[position])
 
         records = [*kept_records, *new_records]
-        kept_matrix = np.vstack(kept_rows) if kept_rows else np.empty((0, 0), dtype=np.float32)
-        if kept_matrix.size == 0:
+        kept_matrix: np.ndarray | None = (
+            np.vstack(kept_rows) if kept_rows else np.empty((0, 0), dtype=np.float32)
+        )
+        if kept_matrix is not None and kept_matrix.size == 0:
             kept_matrix = None
         new_matrix = _embed_texts(active, [record.child_text for record in new_records])
 
         if kept_matrix is None:
-            vectors = new_matrix
+            vectors: np.ndarray | None = new_matrix
         elif new_matrix is None:
             vectors = kept_matrix
         elif kept_matrix.shape[1] == new_matrix.shape[1]:

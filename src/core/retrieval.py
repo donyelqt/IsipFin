@@ -44,23 +44,53 @@ Design (ADR-002, docs/ARCHITECTURE.md query pipeline, docs/SPEC.md section 9):
    indexes yield byte-identical ``ScoredChunk`` lists. No randomness, no clock, no
    iteration-order dependence.
 
+6. **The dense leg is live on the runtime path.** An index persists vectors only, so
+   scoring a *new* query needs an embedder the artifacts do not carry. The runtime
+   entries — the module-level :func:`retrieve` (which lazily reads ``data/index/``) and
+   :func:`load_index` called with the embedder argument omitted — therefore resolve one
+   by the same policy ``scripts/build_index.py`` defines: ``MOCK_LLM=1`` selects the
+   deterministic offline embedder, otherwise the OpenAI-compatible client built from
+   ``OPENAI_API_KEY`` (with ``OPENAI_BASE_URL`` / ``EMBEDDING_BASE_URL`` /
+   ``EMBEDDING_MODEL``). Resolution is lazy, so importing this module builds no client
+   and the hermetic test path never reaches the policy.
+
+   **Never silently degrade.** Outside mock mode, with no embedder obtainable — no key,
+   no ``MOCK_LLM=1`` — the runtime path raises :class:`RetrievalError` instead of
+   answering BM25-only: a dense leg that quietly contributes nothing is the failure this
+   module exists to prevent, and an actionable message names the two ways out. The same
+   typed error fires when the resolved embedder does not fit the persisted vector space
+   (an index built under ``MOCK_LLM=1`` is 64-dimensional and a real embedder is not, so
+   the fix is ``scripts/build_index.py``), which would otherwise surface as a bare FAISS
+   assertion naming neither number. Callers who *want* the sparse-only seam still have
+   it: pass ``embedder=None`` explicitly to :func:`build_index` / :func:`load_index`,
+   which keeps ``dense_score`` at ``0.0`` — the documented "absent", never a score of
+   zero. The embedder is **never persisted**, in either direction.
+
 Artifacts (what carries what) — see ``src/core/index.py``:
 
 - ``chunks.jsonl`` is the **source of truth**: texts and provenance.
 - FAISS holds **vectors only**; the BM25 pickle holds **token lists only**.
-- The embedder is injected and **never persisted**; this module builds no OpenAI client.
+- The embedder is query-time wiring: injected by ``build_index``/``load_index`` callers,
+  or resolved from the environment on the runtime paths above. It is never persisted.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import logging
+import os
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-from src.core.index import ChunkIndex, Embedder
+from src.core.index import ChunkIndex, ChunkRecord, Embedder
 from src.core.pdf_parser import ParsedDocument
+
+logger = logging.getLogger(__name__)
 
 # RRF damping constant (ADR-002 parameter table). 60 is the value the ADR freezes:
 # large enough that the top and second retrievers' disagreements are dampened, small
@@ -150,7 +180,7 @@ def _fuse(dense: np.ndarray | None, sparse: np.ndarray | None, size: int) -> np.
     return total
 
 
-def _order(fused: np.ndarray, records: Iterable) -> list[int]:
+def _order(fused: np.ndarray, records: Iterable[ChunkRecord]) -> list[int]:
     """Record positions sorted by fused score desc, then ``chunk_id`` ascending.
 
     The explicit tie-break makes the order total, so ``fused_rank`` is stable even when
@@ -164,7 +194,7 @@ def _order(fused: np.ndarray, records: Iterable) -> list[int]:
 # --- filtering -------------------------------------------------------------------
 
 
-def _filter_positions(index: ChunkIndex, filters: dict | None) -> list[int]:
+def _filter_positions(index: ChunkIndex, filters: dict[str, Any] | None) -> list[int]:
     """Positions of records surviving ``filters``; unknown keys raise ``ValueError``.
 
     ``section`` matches when ``query`` is contained in any element of the record's
@@ -230,7 +260,7 @@ class HybridRetriever:
         return self._index
 
     def retrieve(
-        self, query: str, k: int = DEFAULT_K, filters: dict | None = None
+        self, query: str, k: int = DEFAULT_K, filters: dict[str, Any] | None = None
     ) -> list[ScoredChunk]:
         if not isinstance(query, str):
             raise ValueError(f"query must be a string, got {type(query).__name__}")
@@ -272,7 +302,7 @@ class HybridRetriever:
     @classmethod
     def _to_scored(
         cls,
-        records: tuple,
+        records: tuple[ChunkRecord, ...],
         position: int,
         dense: np.ndarray,
         sparse: np.ndarray,
@@ -323,6 +353,243 @@ def _top_k(scores: np.ndarray | None, k: int, size: int) -> np.ndarray | None:
     return masked
 
 
+# --- the runtime embedder policy ---------------------------------------------------
+
+
+class RetrievalError(Exception):
+    """Raised when the hybrid retriever cannot serve a query as configured (ADR-007).
+
+    Three situations raise it, all of them a misconfiguration rather than a bad query:
+    no embedder is obtainable outside mock mode (so the dense leg would be silently
+    dark), the resolved embedder does not fit the persisted vector space (an index built
+    under ``MOCK_LLM=1`` is 64-dimensional, a real one is 1536 — the fix is to rebuild),
+    and an index directory that cannot be loaded at all. The graph renders it through
+    ``GraphNodeError``; direct callers get an actionable message instead of a BM25-only
+    answer that looks fine.
+    """
+
+
+# --- the environment surface the embedder policy reads -----------------------------
+# These names duplicate ``scripts/build_index.py`` on purpose: ``src`` must not import
+# that script at module scope (it is not a package, and importing it would drag argparse
+# and a corpus convention into the app), while the two surfaces must still agree on the
+# configuration that decides which embedder runs. The decision itself is *shared*, not
+# duplicated: see :func:`_script_build_embedder`.
+_EMBEDDING_MODE_ENV = "MOCK_LLM"
+_API_KEY_ENV = "OPENAI_API_KEY"
+_BASE_URL_ENV = "OPENAI_BASE_URL"
+_EMBEDDING_BASE_URL_ENV = "EMBEDDING_BASE_URL"
+_EMBEDDING_MODEL_ENV = "EMBEDDING_MODEL"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+
+class _Unset:
+    """Type of the :data:`_UNSET` sentinel: "no embedder argument was passed"."""
+
+
+#: Distinguishes an omitted ``embedder`` argument (the runtime policy applies) from an
+#: explicit ``None`` (the caller *wants* the documented sparse-only seam). A plain
+#: ``None`` default cannot tell those two intents apart, and the whole point of this fix
+#: is that the first must never be reachable by accident.
+_UNSET = _Unset()
+
+
+def _mock_embedder() -> tuple[Embedder, str]:
+    """The deterministic offline embedder, identical to ``scripts/build_index``'s.
+
+    ``MOCK_LLM=1`` reuses the script's own embedder through :func:`_script_build_embedder`
+    whenever that file is present. This local copy is the fallback when it is not (a wheel
+    or a slimmed image), and it reproduces the script's digest-fold bit for bit — sha256
+    of the text, folded to one vector, L2-normalized — so an index built one way scores
+    identically when loaded the other.
+    """
+    import hashlib  # imported locally: the real path never pays for it
+
+    dimensions = 64
+
+    def embedder(texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for text in texts:
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            # sha256 is 32 bytes; the fold repeats it to reach ``dimensions`` (the same
+            # rule the builder uses) and the zero-norm fallback keeps the result a unit
+            # vector so a degenerate text can never blow up the inner product.
+            vector = [
+                float(digest[offset] - 127.5) for offset in range(min(dimensions, len(digest)))
+            ]
+            if len(vector) < dimensions:
+                vector = (vector * ((dimensions // max(1, len(vector))) + 1))[:dimensions]
+            norm = float(sum(value * value for value in vector)) ** 0.5
+            if norm == 0.0:
+                vector = [1.0] + [0.0] * (dimensions - 1)
+            else:
+                vector = [value / norm for value in vector]
+            vectors.append(vector)
+        return vectors
+
+    return embedder, f"mock embedder, deterministic, {dimensions} dims, offline"
+
+
+def _script_build_embedder() -> tuple[Embedder, str] | None:
+    """``scripts/build_index.build_embedder()``, or ``None`` when that file is absent.
+
+    Loading the script by file location reuses the builder's policy directly — so the
+    mock branch, the env names, the key check, the error text and the client construction
+    each have exactly one implementation. A ``BuildError`` raised by it propagates
+    untouched: that message already names the missing variable and the ``MOCK_LLM=1``
+    alternative, which is precisely what the query-time path must show.
+    """
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "scripts" / "build_index.py"
+        if not candidate.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location("isipfin_build_index", candidate)
+        if spec is None or spec.loader is None:
+            return None
+        script = importlib.util.module_from_spec(spec)
+        # The module must be registered before it executes: ``@dataclass(frozen=True)``
+        # resolves its own annotations through ``sys.modules``, so a module that exists
+        # only on the specs and not in the module table breaks at definition time.
+        sys.modules[spec.name] = script
+        try:
+            spec.loader.exec_module(script)
+        except Exception:
+            sys.modules.pop(spec.name, None)  # a half-executed module must not linger
+            raise
+        builder = getattr(script, "build_embedder", None)
+        if not callable(builder):
+            return None
+        embedder, description = builder()
+        return embedder, str(description)
+    except Exception as exc:
+        # A ``BuildError`` from the script, or any failure importing that file: either
+        # way the operator needs the real cause rather than a bare "no embedder". The
+        # script's own types are re-wrapped as *our* typed error, so a caller of this
+        # module catches one exception class for every embedder-resolution failure —
+        # and the message keeps the script's actionable text (missing key, or
+        # ``MOCK_LLM=1``) verbatim, which is the point of reusing the policy.
+        raise RetrievalError(str(exc)) from exc
+
+
+def _owned_embedder(embedder: Embedder, description: str) -> tuple[Embedder, str]:
+    """Rebind an embedder's failures to this module's :class:`RetrievalError`.
+
+    The shared policy builds real clients whose own error types (``BuildError`` from the
+    builder, SDK transport errors) are internal to the builder. A caller of *this* module
+    must be able to catch one class for every retrieval failure, and the dense leg must
+    never be swallowed into sparse-only ranking by a mistake in error typing — so the
+    adapter converts. The message keeps the underlying cause verbatim; the type is made
+    this module's own.
+    """
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        try:
+            return embedder(texts)
+        except RetrievalError:
+            raise
+        except Exception as exc:
+            raise RetrievalError(f"the query-time embedder failed: {exc}") from exc
+
+    return embed, description
+
+
+def _resolve_embedder() -> tuple[Embedder, str]:
+    """The runtime query-time embedder, resolved by the environment (docstring §6).
+
+    ``MOCK_LLM=1`` selects the deterministic offline embedder, key or no key. Otherwise
+    an OpenAI-compatible client is built from ``OPENAI_API_KEY`` (with
+    ``OPENAI_BASE_URL`` / ``EMBEDDING_BASE_URL`` / ``EMBEDDING_MODEL``), and — exactly as
+    the builder fails *before* parsing a corpus — a missing key raises
+    :class:`RetrievalError` naming both the variable and the offline alternative. This is
+    the decision the builder makes when it writes an index, read the same way here when
+    one is queried: an index written by one embedder must be searched by the same one.
+    """
+    if os.environ.get(_EMBEDDING_MODE_ENV, "").strip() == "1":
+        return _owned_embedder(*(_script_build_embedder() or _mock_embedder()))
+    from scripts.build_index import build_embedder  # policy reuse: one implementation
+
+    try:
+        return _owned_embedder(*build_embedder())
+    except Exception as exc:
+        # Reuse the builder's policy, own the error type: the caller catches exactly one
+        # exception class for every resolution failure of this module.
+        raise RetrievalError(str(exc)) from exc
+
+
+#: The one embedder this process queries with, plus the description logged once.
+_EMBEDDER: tuple[Embedder, str] | None = None
+_EMBEDDER_RESOLVED = False
+
+
+def _embedder_for_query() -> Embedder:
+    """The process-wide query-time embedder, logged once when it is first resolved.
+
+    Resolution failure raises rather than returning ``None``: the dense leg going dark
+    without a word is the exact bug this module was fixed for, so the first query in a
+    process either gets a working dense leg or an actionable refusal.
+    """
+    global _EMBEDDER, _EMBEDDER_RESOLVED
+    resolved = _EMBEDDER
+    if not _EMBEDDER_RESOLVED or resolved is None:
+        resolved = _resolve_embedder()
+        _EMBEDDER = resolved
+        _EMBEDDER_RESOLVED = True
+        logger.info("retrieval embedder: %s", resolved[1])
+    return resolved[0]
+
+
+def _embedder_width(embedder: Embedder) -> int | None:
+    """Dimensionality this embedder produces, from one probe call, or ``None`` on doubt.
+
+    The probe is the harness-agnostic way to ask: an embedder is a callable, so the only
+    question that matters is what width comes back. A client that refuses the probe — an
+    unreachable endpoint, a rate limit, a stub returning a scalar — must not decide a
+    whole index's fate, so doubt yields ``None`` and the dense leg meets its own fate
+    through the normal scoring path instead.
+    """
+    try:
+        vectors = embedder(["dimensionality probe"])
+    except Exception:
+        return None
+    if not vectors or not isinstance(vectors[0], (list, tuple)):
+        return None
+    return len(vectors[0])
+
+
+def _check_dense_dimensions(embedder: Embedder, expected: int, where: Path | str) -> None:
+    """Fail early when the embedder's width cannot compare with the index's vectors.
+
+    The classic case is a real ``OPENAI_API_KEY`` against an index built under
+    ``MOCK_LLM=1``: deterministic vectors are 64-wide, real ones 1536, and querying anyway
+    surfaces as a bare FAISS assertion naming neither number. ``IndexFlatIP`` also
+    accepts some mismatched widths and answers with garbage, which is worse than failing
+    — so the check runs before any query and the message names both widths plus the
+    command that fixes them.
+    """
+    width = _embedder_width(embedder)
+    if width is not None and width != expected:
+        raise RetrievalError(
+            f"the embedder resolved from the environment is {width}-dimensional but the "
+            f"index under {where} holds {expected}-dimensional vectors — they cannot be "
+            "compared. Rebuild the index with scripts/build_index.py using the same "
+            "embedder (MOCK_LLM=1 selects the deterministic 64-dimensional one)."
+        )
+
+
+def _embedder_argument(embedder: Embedder | _Unset) -> Embedder | None:
+    """Normalize a ``load_index`` embedder argument to ``ChunkIndex``'s ``None``-or-callable.
+
+    The sentinel means "no argument was passed", so the runtime policy applies; ``None``
+    means the caller explicitly wants the sparse-only seam and is honored as passed.
+    """
+    if isinstance(embedder, _Unset):
+        return _embedder_for_query()
+    return embedder
+
+
+# --- index lifecycle -------------------------------------------------------------
+
 # --- index lifecycle -------------------------------------------------------------
 
 
@@ -330,12 +597,14 @@ def build_index(doc: ParsedDocument, embedder: Embedder | None = None) -> Hybrid
     """Index one document into a fresh handle (idempotent by ``doc_id``).
 
     The document's chunks are chunked by ``src/core/chunking.py`` and embedded through
-    the injected ``embedder`` (``None`` builds a BM25-only index). The result stays in
-    memory — it becomes this process's current index, and the caller persists it with
-    ``handle.save(dir)`` when it wants an on-disk index. Re-indexing the same document
-    replaces its rows instead of appending them, so indexing the same PDF twice leaves
-    the index identical (idempotent by ``doc_id``). The embedder is kept on the handle
-    for query time and never persisted.
+    the injected ``embedder`` (an explicit ``None`` builds a BM25-only index, whose
+    query-time ``dense_score`` stays at the documented ``0.0`` — that is the
+    sparse-only seam a caller asks for on purpose, not the runtime path). The result
+    stays in memory — it becomes this process's current index, and the caller persists
+    it with ``handle.save(dir)`` when it wants an on-disk index. Re-indexing the same
+    document replaces its rows instead of appending them, so indexing the same PDF twice
+    leaves the index identical (idempotent by ``doc_id``). The embedder is kept on the
+    handle for query time and never persisted.
     """
     handle = HybridIndexHandle(ChunkIndex(()).replace_document(doc, embedder=embedder))
     _set_index(handle.index)
@@ -362,7 +631,7 @@ class HybridIndexHandle:
     # --- queries -----------------------------------------------------------------
 
     def retrieve(
-        self, query: str, k: int = DEFAULT_K, filters: dict | None = None
+        self, query: str, k: int = DEFAULT_K, filters: dict[str, Any] | None = None
     ) -> list[ScoredChunk]:
         """Hybrid retrieve with parent expansion; see :class:`HybridRetriever`."""
         return self._retriever.retrieve(query, k=k, filters=filters)
@@ -381,17 +650,28 @@ class HybridIndexHandle:
 
 
 def load_index(
-    dir: str | Path | None = None, embedder: Embedder | None = None
+    dir: str | Path | None = None, embedder: Embedder | _Unset = _UNSET
 ) -> HybridIndexHandle | None:
     """Load a handle from disk, or ``None`` when nothing is persisted.
 
     A missing directory, a missing ``chunks.jsonl`` (no index ever built), or an empty
     index where retrieval must return ``[]`` are all handled without raising.
+
+    With the embedder argument omitted, the runtime policy resolves one (module docstring
+    §6): the dense leg is live, and a missing key or a mismatched vector width raises
+    :class:`RetrievalError`. Pass ``embedder=None`` explicitly to keep the documented
+    sparse-only seam — a deliberate query-time choice, made by a caller that wants one,
+    never the accident of an omitted argument.
     """
     target = Path(dir) if dir is not None else _INDEX_DIR
-    loaded = ChunkIndex.load(target, embedder=embedder)
+    # "Argument omitted" and "argument explicitly None" are two different intents, and
+    # the first must never be reachable by accident, so they use different defaults.
+    active = _embedder_argument(embedder)
+    loaded = ChunkIndex.load(target, embedder=active)
     if loaded is None:
         return None
+    if active is not None and loaded.dim is not None:
+        _check_dense_dimensions(active, int(loaded.dim), target)
     _set_index(loaded)
     return HybridIndexHandle(loaded, directory=target)
 
@@ -404,24 +684,55 @@ def _set_index(index: ChunkIndex) -> None:
 
 
 def _resolve_index() -> ChunkIndex | None:
-    """The module-level index: the built/loaded one, else a lazy disk read (None if absent)."""
+    """The module-level index: the built/loaded one, else a lazy disk read (None if absent).
+
+    A handle built here or loaded in this process always wins: it already carries its own
+    embedder, so re-reading the directory would discard it.
+
+    The lazy disk read — the production path, reached by a node that imports this module
+    without loading an index first — resolves a query-time embedder only when the index
+    actually holds vectors, because a disk index persists vectors only and cannot embed a
+    new query by itself (module docstring §6). Two falls-through stay honest: a directory
+    with nothing persisted reads as ``[]`` (an early caller and a smoke check must both be
+    safe), and an index deliberately built BM25-only has no vectors to be found in. The
+    vector-holding case is not a fall-through: it resolves the embedder, so a missing key
+    raises rather than ranking sparsely in silence.
+    """
     global _INDEX, _INDEX_LOADED
     if not _INDEX_LOADED:
         try:
-            _INDEX = ChunkIndex.load(_INDEX_DIR)
+            # Read the index once, vectors only: the embedder is cheap to ask for but
+            # the corpus is not cheap to re-read, so the vector-holding decision below
+            # is made from this single load rather than loading twice.
+            loaded = ChunkIndex.load(_INDEX_DIR)
         except Exception:
-            _INDEX = None
+            # An unreadable directory is "nothing indexed", not a crash.
+            loaded = None
+        if loaded is not None and loaded.dim is not None:
+            # Vectors on disk with no embedder to compare against: the dense leg must
+            # not go dark silently, so the runtime policy is resolved here. The second
+            # load exists only because an embedder-less index cannot embed a query —
+            # it re-reads the artifacts, never the corpus, and the FAISS rows are the
+            # single source of the stored vectors either way.
+            embedder = _embedder_for_query()
+            _check_dense_dimensions(embedder, int(loaded.dim), Path(_INDEX_DIR))
+            with_embedder = ChunkIndex.load(_INDEX_DIR, embedder=embedder)
+            loaded = loaded if with_embedder is None else with_embedder
+        _INDEX = loaded
         _INDEX_LOADED = True
     return _INDEX
 
 
-def retrieve(query: str, k: int = 8, filters: dict | None = None) -> list[ScoredChunk]:
+def retrieve(query: str, k: int = 8, filters: dict[str, Any] | None = None) -> list[ScoredChunk]:
     """Module-level hybrid retrieval over the process-wide index.
 
     Resolves the index on first use: the handle built/loaded earlier in this process,
-    otherwise a lazy read of ``data/index/``. With no index present this returns ``[]``
-    (an honest "nothing indexed" answer) instead of raising, so early callers and
-    smoke checks stay safe.
+    otherwise a lazy read of ``data/index/`` under the runtime embedder policy. With no
+    index present this returns ``[]`` (an honest "nothing indexed" answer) instead of
+    raising, so early callers and smoke checks stay safe. With an index present but no
+    embedder obtainable (no key and no ``MOCK_LLM=1``) this raises
+    :class:`RetrievalError`: an index the caller can read but cannot rank densely is a
+    configuration failure, not an empty answer.
     """
     index = _resolve_index()
     if index is None:

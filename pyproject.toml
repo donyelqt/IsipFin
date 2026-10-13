@@ -42,3 +42,13 @@ files = ["src/utils", "src/chains"]
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+# Third-party module without inline types: rank_bm25 ships neither a py.typed
+# marker nor a typeshed stub (types-rank_bm25 does not exist), so every symbol it
+# exports is Any under strict mode. Scoped to this module name only — never a
+# repo-wide ignore_missing_imports, which would mask genuinely broken first-party
+# imports. src/core/* enters the analysis graph transitively because
+# src/chains/state.py imports ScoredChunk.
+[[tool.mypy.overrides]]
+module = ["rank_bm25"]
+ignore_missing_imports = true
