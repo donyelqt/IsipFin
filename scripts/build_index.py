@@ -35,9 +35,15 @@ import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from src.core.index import ChunkIndex, Embedder
 from src.core.pdf_parser import ParsedDocument, ParseError, parse_pdf
+
+if TYPE_CHECKING:
+    # Annotation only. The runtime value lives in src.core.retrieval; importing it
+    # here would make this script pay for the retrieval stack on every invocation.
+    from src.core.retrieval import HybridIndexHandle
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PDF_DIR = REPO_ROOT / "data" / "pdfs"
@@ -47,6 +53,20 @@ CATALOG_FILENAME = "docs.jsonl"
 # The five frozen catalog fields (docs/ARCHITECTURE.md data model). Order is the wire
 # format; anything else added to a line would be a different contract.
 CATALOG_FIELDS = ("doc_id", "filename", "sha256", "page_count", "sections")
+
+
+# One line of ``docs.jsonl``: the five frozen fields above. ``size_bytes`` is optional
+# and read-only — it is never written, and its absence falls back to the file's size.
+class CatalogEntry(TypedDict):
+    """One document-catalog line: the frozen fields, plus the optional size hint."""
+
+    doc_id: str
+    filename: str
+    sha256: str
+    page_count: int
+    sections: list[str]
+    size_bytes: NotRequired[int]
+
 
 DOC_ID_CHARS = 12
 MOCK_ENV = "MOCK_LLM"
@@ -144,11 +164,21 @@ class OpenAIEmbedder:
         """Embed every text in one request and return the vectors in order."""
         if not texts:
             return []
-        request: dict = {"model": self._model, "input": list(texts)}
-        if self._dimensions is not None:
-            request["dimensions"] = self._dimensions
+        # The SDK models every keyword precisely (model as a literal union, dimensions
+        # as ``Omit``, extra_headers as a Mapping, …), so a ``**``-unpacked dict cannot
+        # satisfy its overloads. The three keys this class owns are passed explicitly
+        # instead, each already typed the way the SDK expects: ``dimensions`` is
+        # omitted entirely when unset (never sent as 0, which is not a valid width).
         try:
-            response = self._client.embeddings.create(**request)
+            response = (
+                self._client.embeddings.create(
+                    model=self._model,
+                    input=list(texts),
+                    dimensions=self._dimensions,
+                )
+                if self._dimensions is not None
+                else self._client.embeddings.create(model=self._model, input=list(texts))
+            )
         except Exception as exc:  # the client raises many transport-level types
             raise BuildError(
                 f"embedding request to {self._endpoint} failed ({type(exc).__name__}: {exc})"
@@ -170,8 +200,10 @@ def build_embedder() -> tuple[Embedder, str]:
     no dense leg.
     """
     if os.environ.get(MOCK_ENV, "").strip() == "1":
-        embedder = MockEmbedder()
-        return embedder, f"mock embedder, deterministic, {embedder.dimensions} dims, offline"
+        mock_embedder = MockEmbedder()
+        return mock_embedder, (
+            f"mock embedder, deterministic, {mock_embedder.dimensions} dims, offline"
+        )
 
     api_key = os.environ.get(API_KEY_ENV, "").strip()
     if not api_key:
@@ -191,7 +223,7 @@ def build_embedder() -> tuple[Embedder, str]:
     )
     model = os.environ.get(EMBEDDING_MODEL_ENV, "").strip() or DEFAULT_EMBEDDING_MODEL
     try:
-        embedder: Embedder = OpenAIEmbedder(api_key=api_key, base_url=base_url, model=model)
+        embedder: OpenAIEmbedder = OpenAIEmbedder(api_key=api_key, base_url=base_url, model=model)
     except BuildError as exc:
         raise exc
     except Exception as exc:  # pragma: no cover - constructor failures are rare
@@ -207,12 +239,12 @@ def catalog_path(index_dir: Path = INDEX_DIR) -> Path:
     return index_dir / CATALOG_FILENAME
 
 
-def read_catalog(path: Path | None = None) -> dict[str, dict]:
+def read_catalog(path: Path | None = None) -> dict[str, CatalogEntry]:
     """The catalog as ``{doc_id: entry}``; ``{}`` when nothing has been indexed yet."""
     target = path or catalog_path()
     if not target.is_file():
         return {}
-    entries: dict[str, dict] = {}
+    entries: dict[str, CatalogEntry] = {}
     with open(target, encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -228,11 +260,22 @@ def read_catalog(path: Path | None = None) -> dict[str, dict]:
                 # A line without the frozen fields cannot be compared digests against,
                 # so a document it describes could be re-indexed over identical bytes.
                 raise BuildError(f"{target}:{number} is missing catalog field(s) {missing}")
-            entries[str(payload["doc_id"])] = payload
+            # The line is JSON, so its values are coerced into the entry's declared
+            # types here; every one of the frozen fields is present (checked above).
+            entry: CatalogEntry = {
+                "doc_id": str(payload["doc_id"]),
+                "filename": str(payload.get("filename", "")),
+                "sha256": str(payload.get("sha256", "")),
+                "page_count": int(payload.get("page_count", 0)),
+                "sections": list(payload.get("sections", [])),
+            }
+            if "size_bytes" in payload:
+                entry["size_bytes"] = int(payload["size_bytes"])
+            entries[str(payload["doc_id"])] = entry
     return entries
 
 
-def write_catalog(entries: Iterable[dict], path: Path | None = None) -> None:
+def write_catalog(entries: Iterable[CatalogEntry], path: Path | None = None) -> None:
     """Rewrite the catalog from scratch, in ``doc_id`` order, with the frozen fields.
 
     A rewrite (rather than an append) keeps the file sorted and unique even when the
@@ -327,11 +370,14 @@ class DocReport:
         return self.doc_id[:DOC_ID_CHARS]
 
 
-def _load_existing(index_dir: Path, embedder: Embedder):
+def _load_existing(index_dir: Path, embedder: Embedder) -> HybridIndexHandle | None:
     """The index already on disk, as a handle, or ``None`` when nothing is persisted.
 
     T4 owns that loader: the chunks, the FAISS rows and the BM25 pickle are re-read
     together, so a build that adds one document never disturbs the others' rows.
+    ``load_index`` is imported here, and ``HybridIndexHandle`` under ``TYPE_CHECKING``
+    at module scope, so a build that never touches an existing index does not pay
+    for the retrieval stack at runtime while the annotation still resolves.
     """
     from src.core.retrieval import load_index
 
@@ -339,8 +385,8 @@ def _load_existing(index_dir: Path, embedder: Embedder):
 
 
 def index_one(
-    path: Path, embedder: Embedder, catalog: dict[str, dict], index_dir: Path
-) -> tuple[DocReport, object | None]:
+    path: Path, embedder: Embedder, catalog: dict[str, CatalogEntry], index_dir: Path
+) -> tuple[DocReport, ParsedDocument | None]:
     """Index one PDF, or skip it when the catalog already holds its digest.
 
     The digest is read from the file itself, which is the only cheap proof that the
@@ -427,7 +473,7 @@ def index_one(
     )
 
 
-def _entry_for(report: DocReport, doc: ParsedDocument) -> dict:
+def _entry_for(report: DocReport, doc: ParsedDocument) -> CatalogEntry:
     """The frozen five-field catalog line for one document (docs/ARCHITECTURE.md)."""
     return {
         "doc_id": report.doc_id,
@@ -497,7 +543,7 @@ def build(
         return 1
 
     catalog = read_catalog(catalog_path(index_dir))
-    entries: dict[str, dict] = {str(entry["doc_id"]): entry for entry in catalog.values()}
+    entries: dict[str, CatalogEntry] = {str(entry["doc_id"]): entry for entry in catalog.values()}
     reports: list[DocReport] = []
     documents: dict[str, ParsedDocument] = {}
     failures: list[str] = []

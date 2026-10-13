@@ -140,6 +140,30 @@ _UNSUPPORTED_YEARS: frozenset[str] = frozenset({"2019", "2020", "2024", "2025", 
 # a single lookbehind for a *digit* rather than a word boundary, because the corpus writes
 # periods as "FY2023" and a word boundary never appears between "Y" and "2".
 _YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+# Distinct fiscal periods in either 4-digit ("FY2023", "fiscal year 2023") or the
+# 2-digit fiscal-year shorthand ("FY23", "fy 23") the exam's golden questions use.
+# Used ONLY by `_is_comparison` to count how many periods a question names;
+# `_asked_year` deliberately keeps the 4-digit pattern so `_UNSUPPORTED_YEARS`
+# membership stays an exact, unambiguous check.
+_PERIOD = re.compile(
+    r"(?<!\d)(?:(?:fy\s*|fiscal\s+year\s*)(?:19|20)?\d{2}|(?:19|20)\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_period(match: str) -> str:
+    """Canonical form for a matched period so FY23 and FY2023 count as one."""
+    digits = re.sub(r"\D", "", match)
+    if len(digits) == 4:
+        return digits
+    return "20" + digits
+
+
+def _distinct_periods(question: str) -> set[str]:
+    return {_normalize_period(m) for m in _PERIOD.findall(question)}
+
+
 # Labeled question markers in the node input templates (P1, P2, P3). The last one present
 # wins, so a rewritten standalone question that itself names a period still resolves.
 _QUESTION_LABELS: tuple[str, ...] = (
@@ -347,11 +371,11 @@ def _out_of_scope(question: str) -> bool:
 def _is_comparison(question: str) -> bool:
     """True for a question that asks for two periods or two metrics side by side."""
     lowered = question.lower()
-    years = _YEAR.findall(lowered)
+    periods = _distinct_periods(question)
     comparative = any(
         word in lowered for word in ("compare", "versus", "vs", "change", "grew", "trend")
     )
-    return comparative and (len(years) >= 2 or "trend" in lowered)
+    return comparative and (len(periods) >= 2 or "trend" in lowered)
 
 
 # --- context parsing --------------------------------------------------------------
@@ -431,16 +455,165 @@ def _query_plan(question: str, body: str) -> dict[str, Any]:
     }
 
 
+# The catalog reaches the mock as *rendered text*, and the renderer is the caller's: P1's
+# template dumps it with ``json.dumps(indent=2)``, but a compact dump, a truncated catalog or
+# a hand-written fixture spells the same listing with different whitespace, comma placement
+# and nesting. The listing is read by locating the ``"sections"`` key and taking whatever
+# value follows it, rather than by matching one exact rendering of one array.
+
+#: How many section paths a plan names: ``retrieve`` filters on exactly one name, so the list
+#: stays short and predictable however long the catalog it came from was.
+_MAX_SECTIONS = 6
+#: The catalog key a P1 payload renders each document's section listing under.
+_SECTIONS_KEY = re.compile(r'"sections"\s*:\s*')
+#: One JSON string literal. It cannot cross an unescaped quote, so the match is exact.
+_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _unquote(literal: str) -> str | None:
+    """One JSON string literal decoded to the text it names, or ``None`` if it is not one."""
+    try:
+        decoded: str | None = json.loads(literal)
+    except ValueError:
+        # A hand-written literal the JSON parser rejects still names a section: the quotes
+        # come off and an escaped quote is unescaped, the honest reading of what was written.
+        return literal[1:-1].replace('\\"', '"')
+    return decoded if isinstance(decoded, str) else None
+
+
+def _elements(text: str, at: int) -> tuple[list[str], int]:
+    """The comma-separated elements of the array starting at ``at``, plus where it ends.
+
+    String literals are stepped over whole, so a quote, bracket or comma inside a section path
+    is never mistaken for structure; a comma separates elements only at the array's own depth,
+    so a nested listing or an object stays inside a single element. Closing early on the first
+    unmatched bracket is what keeps a truncated catalog from swallowing the rest of the payload.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = at + 1
+    index = start
+    while index < len(text):
+        literal = _STRING_LITERAL.match(text, index)
+        if literal is not None:
+            index = literal.end()
+            continue
+        char = text[index]
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            if depth == 0:
+                # The element before the closing bracket ends here too, not at the last comma.
+                parts.append(text[start:index])
+                return parts, index + 1
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index])
+            start = index + 1
+        index += 1
+    return parts, len(text)
+
+
+def _paths(parts: list[str]) -> list[str]:
+    """The section paths an array's element texts name, in order.
+
+    A nested array is read as a listing in its own right and flattened into the same order; an
+    element that is not a string — a number, an object, the empty slot a trailing comma leaves
+    — names nothing, so a partially rendered catalog yields nothing rather than a guess.
+    """
+    found: list[str] = []
+    for part in parts:
+        element = part.strip()
+        if not element:
+            continue
+        if element.startswith("["):
+            nested, _ = _elements(element, 0)
+            found.extend(_paths(nested))
+            continue
+        literal = _STRING_LITERAL.fullmatch(element)
+        if literal is None:
+            continue
+        decoded = _unquote(literal.group(0))
+        if decoded:
+            found.append(decoded)
+    return found
+
+
+def _value_paths(text: str, at: int) -> list[str]:
+    """The section paths named by the value starting at ``at``: an array, or a lone string."""
+    index = at
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return []
+    if text[index] == "[":
+        parts, _ = _elements(text, index)
+        return _paths(parts)
+    literal = _STRING_LITERAL.match(text, index)
+    if literal is None:
+        return []
+    decoded = _unquote(literal.group(0))
+    return [decoded] if decoded else []
+
+
+def _bare_paths(body: str) -> list[str]:
+    """A payload that is *only* a listing, read whole: its first array, or a lone string.
+
+    That requirement is what keeps the tolerance honest — a catalog whose key is spelled some
+    other way yields nothing here, rather than having its filenames, doc ids and page counts
+    read as section paths.
+    """
+    stripped = body.lstrip()
+    if stripped.startswith('"'):
+        return _value_paths(body, len(body) - len(stripped))
+    index = 0
+    while index < len(body):
+        literal = _STRING_LITERAL.match(body, index)
+        if literal is not None:
+            index = literal.end()
+            continue
+        if body[index] == "[":
+            parts, _ = _elements(body, index)
+            return _paths(parts)
+        index += 1
+    return []
+
+
+def _listing(body: str) -> list[str]:
+    """Every section path the payload renders, in first-seen order.
+
+    The key decides when it is there: a catalog is one JSON object per document and only its
+    ``"sections"`` value is a listing, so the filenames, doc ids and page counts sharing that
+    object are never read as one. A payload carrying no such key is read as a listing only
+    where a listing can stand on its own.
+    """
+    keys = list(_SECTIONS_KEY.finditer(body))
+    if not keys:
+        return _bare_paths(body)
+    found: list[str] = []
+    for key in keys:
+        found.extend(_value_paths(body, key.end()))
+    return found
+
+
 def _catalog_sections(body: str) -> list[str]:
-    """Section paths named in the payload's document catalog, in first-seen order."""
+    """Section paths named in the payload's document catalog, in first-seen order.
+
+    Shape-tolerant on purpose. The catalog arrives as rendered text and the renderer is the
+    caller's: ``json.dumps`` with any indent, a compact dump, a per-document nested
+    structure, a trailing comma, or a bare string. Matching one exact spelling would silently
+    empty ``required_sections`` for every realistic payload, which would misreport to the
+    debug panel a capability the mock does have. What the payload does not render, the mock
+    does not invent: an empty catalog is an empty list, and a listing this cannot read stays
+    empty rather than being guessed at.
+    """
     sections: list[str] = []
     seen: set[str] = set()
-    for match in re.finditer(r"\[\s*\"([^\"]+, [^\"]+)\"\s*\]", body):
-        for entry in match.group(1).split('", "'):
-            if entry not in seen:
-                seen.add(entry)
-                sections.append(entry)
-    return sections[:6]
+    for path in _listing(body):
+        if path not in seen:
+            seen.add(path)
+            sections.append(path)
+    return sections[:_MAX_SECTIONS]
 
 
 def _grounding_result(body: str) -> dict[str, Any]:
