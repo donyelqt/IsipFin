@@ -119,6 +119,7 @@ never be installed as corpus. The PDF itself is gitignored (`.gitignore`: `*.pdf
 │   │   ├── llm.py             # build_llm(), ChatLLM, LLMError taxonomy, backoff
 │   │   ├── mock_llm.py        # MockLLM: offline deterministic scripted gateway
 │   │   ├── prompts.py         # load_prompt() over docs/prompts/, PromptError taxonomy
+│   │   ├── settings.py        # load_env() → repo-root .env once; REPO_ROOT (python-dotenv)
 │   │   └── tracing.py         # @trace_node → node_trace (ADR-007 §2)
 │   └── store/                 # chat-store: SQLite schema + accessors
 ├── scripts/                   # download_corpus.py, build_index.py, demo_script.py, check_floor.py
@@ -133,10 +134,16 @@ never be installed as corpus. The PDF itself is gitignored (`.gitignore`: `*.pdf
 
 Prompt assets live in `docs/prompts/` (P1–P5 markdown, version-headered), loaded by
 `src/utils/prompts.py`; `scripts/prompts_meta.json` records the minimum version and the
-consuming node per id. There is deliberately **no** top-level `prompts/` directory and no
-`src/utils/settings.py`: environment variables are read by the modules that use them
-(`build_llm()` reads `MOCK_LLM`/`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`,
-`scripts/build_index.py` reads the same names plus the `EMBEDDING_*` pair).
+consuming node per id. There is deliberately **no** top-level `prompts/` directory.
+Environment variables are read by the modules that use them (`build_llm()` reads
+`MOCK_LLM`/`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`, `scripts/build_index.py` reads
+the same names plus the `EMBEDDING_*` pair), but the `.env` file itself is loaded from the
+repo root by `src/utils/settings.py::load_env()`: it resolves the root from its own
+`__file__` (so `streamlit run app.py`, `python scripts/build_index.py` and pytest all find
+the same file), is idempotent, and never overrides an already-set variable. It is called
+first in `app.py::main()` and in `scripts/build_index.py::main()` /
+`scripts/eval_rag.py::main()` — that call is what makes the documented
+`cp .env.example .env` setup path supply the key and `MOCK_LLM` at all.
 
 ## 5. Code Style
 
