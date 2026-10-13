@@ -43,6 +43,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import html
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -90,8 +91,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: Corpus directory for uploaded PDFs, mirroring the data model in docs/ARCHITECTURE.md.
 PDF_DIR = REPO_ROOT / "data" / "pdfs"
 
-#: Index directory the artifacts are read from and written to.
-INDEX_DIR = REPO_ROOT / "data" / "index"
+#: Index directory the artifacts are read from and written to. ``INDEX_DIR`` in the environment
+#: overrides it: the mock embedder is 64-dimensional and a real one 384, and a single directory
+#: cannot hold both, so a reader running `MOCK_LLM=1` after a real build points this at the mock
+#: index rather than rebuilding. Left unset it is the ordinary `data/index`.
+INDEX_DIR = Path(os.environ.get("INDEX_DIR", "").strip() or (REPO_ROOT / "data" / "index"))
 
 #: The catalog file, one JSON line per document (the frozen wire format).
 CATALOG_FILENAME = "docs.jsonl"
@@ -254,10 +258,14 @@ def _builder() -> Any:
 def _resolve_embedder() -> tuple[Embedder, str]:
     """The ingest-time embedder, resolved by the builder's environment policy.
 
-    ``MOCK_LLM=1`` selects the deterministic offline embedder; otherwise an
-    OpenAI-compatible client is built from ``OPENAI_API_KEY`` and a missing one fails here,
-    before any PDF is parsed or half an index written. The type is made this module's own
-    (the builder raises its ``BuildError``); the message is kept verbatim.
+    The policy — including ``EMBEDDING_PROVIDER`` — lives entirely in
+    ``scripts/build_index.build_embedder``, which this calls; this function only rebinds
+    the failure type, so ingest and query cannot disagree about the provider or the
+    width. In short: ``MOCK_LLM=1`` selects the deterministic offline embedder; otherwise
+    ``EMBEDDING_PROVIDER`` picks ``local`` (fastembed in-process, the default, no key) or
+    ``api`` (an OpenAI-compatible client from ``OPENAI_API_KEY``, whose absence fails
+    here, before any PDF is parsed or half an index written). The type is made this
+    module's own (the builder raises its ``BuildError``); the message is kept verbatim.
     """
     try:
         embedder, description = _builder().build_embedder()

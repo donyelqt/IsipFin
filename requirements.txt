@@ -8,6 +8,7 @@ langchain-core==1.6.10  # floor >=1.4.7 declared by langgraph 1.2.14; latest ver
 langchain-text-splitters==1.1.3  # direct dep (ADR-002 chunking); not declared by langgraph
 openai==3.29.0
 faiss-cpu==1.15.1       # cp311 wheels confirmed
+fastembed==0.9.0        # local embeddings (EMBEDDING_PROVIDER=local, the default): ONNX Runtime, no torch
 rank-bm25==0.2.2
 pypdf==6.20.1
 pdfplumber==0.11.10
