@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Prompt id | `P4` |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 | Node | shared formatting contract used by `synthesize_answer` and the summarizer |
 | Model target | any |
 | Output schema | markdown (tables + prose) |
-| Changelog | 1.0.0 — initial |
+| Changelog | 1.0.1 — corrected rule 1's citation placement: "a source note under the table lists the [n] markers" prescribed a placement the verifier's `split_units` cannot read (the table block ends before the note, so the rows inherit no marker and every row is trimmed as `figure_not_in_span`), and it contradicted rule 4, which already prescribed the placement that works — a marker in each row's label cell, or per-cell. Motivated by golden case q03 `Compare revenue and operating income between FY2023 and FY2022`: the real run's two table rows were both trimmed, leaving `figure_ok: False` and the answer `&#124;&#124;(unsupported claim removed)&#124;&#124;`<br>1.0.0 — initial |
 
 ## Purpose
 
@@ -25,7 +25,11 @@ FORMATTING CONTRACT (tables and numbers):
    |---|---|---|
    | Revenue | $ 211,915 | $ 198,270 |
    - Row label first, periods as columns; align numbers right; keep header row.
-   - A source note under the table lists the [n] markers for the rows it covers.
+   - Put the [n] marker in the table itself — in each row's label cell when one block
+     supports the whole row, per-cell when the cells come from different blocks (rule 4).
+     A source note listed *below* the table does not cite the rows: the verifier reads a
+     table's markers from inside the table, so a note underneath leaves every row
+     uncited and each row is trimmed as an unsupported claim.
    - Never split a table the context provides into prose, and never rebuild a table the
      context does not fully support — partial tables must name the missing cells "(not
      disclosed)".
@@ -56,6 +60,7 @@ FORMATTING CONTRACT (tables and numbers):
 | Bold on every number | Noise; the grader can't find the headline figure | Rule 5 |
 | FY2024 comparative column quoted for FY2023 | Silent wrong-year answer | Rule 1 + P3 rules 2–4 |
 | "About $212 billion" alone | Conversion without the printed figure | Rule 6 |
+| The table's `[n]` markers in a source note below it | The verifier reads a table's markers from inside the table, so a note below it leaves every row uncited and each row is trimmed as `figure_not_in_span` | Rule 1 + rule 4 |
 
 ## Iteration notes (fill during build)
 

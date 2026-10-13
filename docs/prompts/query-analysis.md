@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Prompt id | `P1` |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 | Node | `analyze_question` |
 | Model target | any (runs at temperature 0.0) |
-| Output schema | `QueryPlan` JSON (see `src/chains/schemas.py`) |
-| Changelog | 1.0.0 — initial: kind, sub_queries, required_sections, missing_aspect |
+| Output schema | `QueryPlan` JSON (declared inline as `QUERY_PLAN_SCHEMA` in `src/chains/nodes/analyze.py`) |
+| Changelog | 1.0.1 — header correction: the Output schema row named a module that does not exist; it now names `QUERY_PLAN_SCHEMA` in `src/chains/nodes/analyze.py`, where the schema is declared inline<br>1.0.0 — initial: kind, sub_queries, required_sections, missing_aspect |
 
 ## Purpose
 

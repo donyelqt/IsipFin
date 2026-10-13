@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Prompt id | `P5` |
-| Version | 1.0.0 |
+| Version | 1.0.2 |
 | Node | `groundedness_check` (+ optional summarization mode of `synthesize_answer`) |
 | Model target | any (temperature 0.0 — verification must be deterministic) |
-| Output schema | `GroundingResult` JSON (see `src/chains/schemas.py`) |
-| Changelog | 1.0.0 — initial: claim-level span verification |
+| Output schema | `GroundingResult` JSON (declared inline as `GROUNDING_SCHEMA` in `src/chains/nodes/verify.py`) |
+| Changelog | 1.0.2 — header correction: the "You receive" line claimed the node ships P5 the whole retrieved context, which is no longer true — the node now sends only the blocks the undecided claims cite (all of them when none cites anything), because a claim is judged against the span it cites and prefill for the rest is dead weight<br>1.0.1 — header correction: the Output schema row named a module that does not exist; it now names `GROUNDING_SCHEMA` in `src/chains/nodes/verify.py`, where the schema is declared inline<br>1.0.0 — initial: claim-level span verification |
 
 ## Part A — Groundedness check (primary use)
 
@@ -26,7 +26,9 @@ You verify that the remaining candidate claims are fully supported by the provid
 
 You receive:
   - the candidate answer (markdown, with [n] citation markers),
-  - the same numbered context blocks synthesis used.
+  - the numbered context blocks those remaining claims cite: the union of their [n] markers,
+    numbered as they are numbered in the answer. Every block is provided when no claim cites
+    one.
 
 For each factual claim in the answer, decide:
   supported        — the cited [n] block contains BOTH the metric label AND the figure/date

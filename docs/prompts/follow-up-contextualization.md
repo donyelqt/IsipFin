@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Prompt id | `P2` |
-| Version | 1.0.0 |
+| Version | 1.0.2 |
 | Node | `contextualize_question` |
 | Model target | any (temperature 0.0) |
 | Output schema | plain text — one standalone question |
-| Changelog | 1.0.0 — initial: history window + cited_pages disambiguation |
+| Changelog | 1.0.2 — added metric-fidelity rule: when the previous answer carried figures, the rewrite must keep the same metric family as those figures (dollar margin is a different question from percentage margin) and must not switch units or scope — the follow-up's figures are what the answer is scored on, so a rewrite that silently changes what is being asked drops them |
 
 ## Purpose
 
@@ -34,6 +34,15 @@ Rules:
 - Keep the question's intent; never add a question the user did not ask.
 - Preserve the fiscal period from the previous turn when the follow-up does not restate it
   ("and the margin trend?" after FY2023 → "What was the operating margin trend in FY2023?").
+- If the PREVIOUS ANSWER figures were about one metric family, the standalone question MUST ask
+  about that same metric family. Dollar margin (operating income, revenue) and percentage margin
+  (gross margin %, operating margin %) are different questions, and a rewrite that switches
+  between them asks something the prior turn never answered. Treat the figures as the definition
+  of what was being discussed, and keep the question comparable to them.
+- Do not switch units or scope while rewriting: a figure the previous answer reported in dollars
+  stays a dollar question, not a percentage; a company-wide figure stays company-wide unless the
+  follow-up itself names a segment, period, or entity. Widening or narrowing the scope is adding
+  a question the user did not ask.
 - If the follow-up is ambiguous even with history, resolve to the MOST RECENT concrete topic
   the previous answer covered; do not ask clarifying questions (the UI has no affordance).
 - Output exactly one question. No preamble, no JSON, no quotes, no trailing explanation.
@@ -67,5 +76,14 @@ offline tests.
 
 - v1.0.0 rationale: `cited_pages`/entities are passed because STRESS-TEST-RAG #3 showed
   pronoun drift when the model rewrites from content alone ("that increase" → wrong segment).
+- v1.0.2 rationale: golden case q07 `And the margin trend?` (follow-up of q01) was rewritten
+  nondeterministically by the live provider at temperature 0 — one run turned the follow-up into
+  a gross-margin *percentage* question, so synthesis answered with percentages and neither
+  expected figure ($88,523 operating income, $211,915 revenue) appeared; another run trimmed the
+  answer entirely to "(unsupported claim removed)". The prior turn replayed q01's figures via
+  P2's own history/citations/entities mechanism precisely so the rewrite stays comparable to
+  them; the rule names that contract (same metric family, no unit or scope switch) because the
+  prompt previously left it to the model. The provider's residual run-to-run variation is not
+  claimed as fixed by this — only the systematic metric-family loss.
 - TODO during build: after T14's golden follow-up pairs, record the drift case that motivated
   passing citations, with before/after rewrites.
