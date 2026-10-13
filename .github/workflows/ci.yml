@@ -1,0 +1,70 @@
+# CI — the number-producing gates from docs/CONSTRAINTS.md ("Enforced with numbers"),
+# wired exactly as ADR-008 decided: one job, no matrix, no registry credentials, no push.
+#
+# The test suite is hermetic by contract (docs/CONSTRAINTS.md; AGENTS.md §2): no test may
+# open a socket, read a real .env, or write into the tree.  No OPENAI_API_KEY is provided
+# here on purpose — a test that reached the network would fail, which is the intended proof.
+# Coverage: changed-line >= 80% is judged by intersecting this report with `git diff`
+# (docs/CONSTRAINTS.md), so no global --fail-under is invented.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: read the checkout, nothing else.  The docker build smoke pushes nothing.
+permissions:
+  contents: read
+
+# Superceded runs on the same ref are pointless; cancel them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: gates (py3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Repo root on sys.path so `import src.*` resolves the same way it does in a
+      # dev checkout (AGENTS.md §2: the package is importable from any cwd).
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          # .python-version pins `3.11`; requires-python == "3.11.*" (pyproject.toml).
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check src tests scripts app.py
+
+      - name: Format (black --check)
+        run: black --check src tests scripts app.py
+
+      - name: Types (mypy, scoped)
+        run: mypy src/utils src/chains
+
+      - name: Floor guard (repo-wide)
+        run: python scripts/check_floor.py --repo-wide
+
+      - name: Tests (hermetic, no network) + coverage report
+        run: pytest -q --cov=src --cov-report=term-missing
+
+      # Smoke only: prove the image builds.  No push, no registry credentials (ADR-008).
+      - name: Docker build smoke
+        run: docker build --tag isipfin .
