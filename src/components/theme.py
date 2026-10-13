@@ -11,19 +11,23 @@ What this module exports
 ------------------------
 
 Injection
-    :func:`inject_theme` — emit the whole stylesheet, once per run. ``st.html``
-    sends style-only content to the *event* container, so the call costs no
-    vertical space; a second call in the same run is a no-op (see
-    :data:`INJECTED_KEY`), because a duplicate ``<style>`` block would just
-    re-win the same specificity fight.
+    :func:`inject_theme` — emit the whole stylesheet, on *every* run. It must
+    never be memoised: Streamlit removes any element a rerun does not re-send, so
+    a stylesheet emitted only once is destroyed by the user's first click and the
+    app reverts to bare Streamlit chrome (measured in a real browser — see
+    :func:`inject_theme`). ``st.html`` sends style-only content to the *event*
+    container, so the call costs no vertical space, but ``st.html`` also drops
+    the ``<style>`` element itself, which is why the block goes through
+    ``st.markdown(..., unsafe_allow_html=True)``.
 
 Tokens
     :data:`BG`, :data:`SURFACE`, :data:`SURFACE_2`, :data:`BORDER`,
     :data:`BORDER_STRONG`, :data:`TEXT`, :data:`TEXT_MUTED`, :data:`TEXT_DIM`,
     :data:`ACCENT`, :data:`ACCENT_STRONG`, :data:`ACCENT_DIM`,
-    :data:`SUCCESS`, :data:`WARNING`, :data:`ERROR`, :data:`RADIUS`,
-    :data:`RADIUS_SMALL`, :data:`FONT_SANS`, :data:`FONT_MONO`, plus
-    :data:`TOKENS` (the name → value mapping the CSS block is rendered from).
+    :data:`ACCENT_SOFT`, :data:`SUCCESS`, :data:`WARNING`, :data:`ERROR`,
+    :data:`RADIUS`, :data:`RADIUS_LG`, :data:`RADIUS_SMALL`, :data:`FONT_SANS`,
+    :data:`FONT_MONO`, plus :data:`TOKENS` (the name → value mapping the CSS
+    block is rendered from).
 
 Render helpers
     :func:`panel`, :func:`label`, :func:`figure`, :func:`badge`,
@@ -32,22 +36,34 @@ Render helpers
     gateway: a component that prefers to write its own markup may import the
     class names (:data:`CSS_CLASSES`) or the tokens directly instead.
 
+Layout helpers
+    :func:`rail_brand`, :func:`rail_label`, :func:`rail_status_card` describe the
+    rail's three fixed rows (brand mark, section label, workspace card);
+    :func:`hero_mark`, :func:`hero_title`, :func:`hero_sub`, :func:`eyebrow`,
+    :func:`footer_note` describe the canvas's centred empty state and its footer
+    line. They are the same kind of emitter as the render helpers — one HTML
+    fragment each, escaped and classified — but they carry the *placement*
+    (centred, upper-case, muted) that would otherwise be re-invented per caller.
+
 The rules the stylesheet enforces
 ---------------------------------
-1. **One radius scale.** ``--isip-radius`` (10px) for panels and cards,
-   ``--isip-radius-small`` (8px) for inputs and inline chips, and a full pill for
-   the one primary CTA. No third size exists, on purpose.
+1. **One radius scale.** ``--isip-radius`` (10px) for panels, cards and the primary
+   CTA, ``--isip-radius-lg`` (16px) for the composer dock and the brand marks, and
+   ``--isip-radius-small`` (8px) for inputs and inline chips. No other size exists,
+   on purpose.
 2. **Two type roles.** IBM Plex Sans for prose, IBM Plex Mono for every figure,
    table, id and code-ish string — so a reader can tell a number from a word at a
    glance. ``--isip-font-sans`` carries a system fallback stack, so the app still
    renders (and still passes contrast) when Google Fonts is unreachable.
 3. **No structural emoji.** Status is carried by :func:`badge` labels and the
    color tokens; the iconless markup keeps the UI accessible and grep-clean.
-4. **Two reserved widget-key prefixes.** The chat pane's role containers are
-   keyed ``isip-answer…`` / ``isip-question…`` and styled by CSS prefix
-   selectors, so any *other* widget keyed with either prefix silently inherits
-   a role border. ``chat._ANSWER_KEY`` / ``chat._QUESTION_KEY`` are the
-   definition; every other component must pick a different prefix.
+4. **Reserved widget-key prefixes.** Five prefixes are styled by selector, so
+   any *other* widget keyed with one of them silently inherits that styling:
+   ``isip-answer…`` / ``isip-question…`` (the chat pane's role containers, and
+   the only two that add a border), ``isip-nav…`` (the rail's nav buttons),
+   ``isip-suggestion…`` (the hero's demo chips) and ``isip-session…`` (the
+   conversation rows). The owning component's module constant is the definition;
+   every other component must pick a new prefix rather than borrowing one.
 5. **Zero business logic.** This module renders tokens and containers. It never
    reads the store, prompts, retrieval or the LLM gateway (ADR-009's boundary).
 """
@@ -55,7 +71,7 @@ The rules the stylesheet enforces
 from __future__ import annotations
 
 import html
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import streamlit as st
@@ -63,6 +79,7 @@ import streamlit as st
 __all__ = [
     "ACCENT",
     "ACCENT_DIM",
+    "ACCENT_SOFT",
     "ACCENT_STRONG",
     "BG",
     "BORDER",
@@ -72,8 +89,8 @@ __all__ = [
     "FONT_IMPORT_URL",
     "FONT_MONO",
     "FONT_SANS",
-    "INJECTED_KEY",
     "RADIUS",
+    "RADIUS_LG",
     "RADIUS_SMALL",
     "SUCCESS",
     "SURFACE",
@@ -85,10 +102,18 @@ __all__ = [
     "WARNING",
     "badge",
     "caption_note",
+    "eyebrow",
     "figure",
+    "footer_note",
+    "hero_mark",
+    "hero_sub",
+    "hero_title",
     "inject_theme",
     "label",
     "panel",
+    "rail_brand",
+    "rail_label",
+    "rail_status_card",
     "spacer",
 ]
 
@@ -119,6 +144,9 @@ ACCENT = "#FF7A1A"
 ACCENT_STRONG = "#FF9347"
 #: Tinted wash for selected rows / hovered list items / the citation marker chip.
 ACCENT_DIM = "rgba(255,122,26,0.14)"
+#: The faintest accent wash: a focus ring / halo behind a control, where
+#: ``ACCENT_DIM`` would read as a *selected* state rather than an indication.
+ACCENT_SOFT = "rgba(255,122,26,0.10)"
 
 #: Status colors. Kept to the three the UI actually states (ok / warn / error);
 #: nothing else is allowed to use them.
@@ -128,6 +156,9 @@ ERROR = "#F85149"
 
 #: The one radius scale. Radii is the *only* place a new size would show up.
 RADIUS = "10px"
+#: The large radius: the composer dock and the brand marks, the two places the
+#: design is deliberately softer than a card so they read as *the* focal point.
+RADIUS_LG = "16px"
 RADIUS_SMALL = "8px"
 
 #: Prose font. The ``-apple-system``/``Segoe UI`` front of the stack means the
@@ -162,10 +193,12 @@ TOKENS: dict[str, str] = {
     "--isip-accent": ACCENT,
     "--isip-accent-strong": ACCENT_STRONG,
     "--isip-accent-dim": ACCENT_DIM,
+    "--isip-accent-soft": ACCENT_SOFT,
     "--isip-success": SUCCESS,
     "--isip-warning": WARNING,
     "--isip-error": ERROR,
     "--isip-radius": RADIUS,
+    "--isip-radius-lg": RADIUS_LG,
     "--isip-radius-small": RADIUS_SMALL,
     "--isip-font-sans": FONT_SANS,
     "--isip-font-mono": FONT_MONO,
@@ -192,12 +225,24 @@ CSS_CLASSES = (
     "isip-rule",
     "isip-spacer",
     "isip-note",
+    "isip-mark",
+    "isip-hero-mark",
+    "isip-hero",
+    "isip-hero-title",
+    "isip-hero-accent",
+    "isip-hero-sub",
+    "isip-eyebrow",
+    "isip-footer",
+    "isip-rail-brand",
+    "isip-rail-wordmark",
+    "isip-rail-subtitle",
+    "isip-rail-names",
+    "isip-rail-label",
+    "isip-rail-card",
+    "isip-rail-card-head",
+    "isip-rail-card-title",
+    "isip-rail-card-line",
 )
-
-#: Reads: whether the stylesheet is already in this run's document. Writes must
-#: stay a plain bool: the value only has to survive a single script run, and a
-#: stale ``st.session_state`` key is the one thing Streamlit will not give us.
-INJECTED_KEY = "_isip_theme_injected"
 
 
 # --- the stylesheet ------------------------------------------------------------
@@ -297,7 +342,7 @@ input, textarea, [data-baseweb="input"], [data-baseweb="textarea"] {
  * `st.set_page_config(initial_sidebar_state=260)` in app.py, and this block
  * only owns the surface, the hairline and the padding.
  */
-[data-testid="stSidebar"] section[data-testid="stSidebarContent"] {
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
     background-color: var(--isip-surface);
     border-right: 1px solid var(--isip-border);
 }
@@ -309,17 +354,21 @@ input, textarea, [data-baseweb="input"], [data-baseweb="textarea"] {
 /* --- primary action ----------------------------------------------------- */
 
 /*
- * The pill CTA. One rule, one target: `st.button(..., type="primary")` renders
+ * The primary CTA. One rule, one target: `st.button(..., type="primary")` renders
  * as `.stBaseButton-primary`, which Streamlit itself styles for the light
  * theme. This restyles the shell and the label, and keeps the hover/active
  * states inside the same spec.
+ *
+ * A rounded rectangle on the shared 10px radius, not a pill: the reference layout
+ * this rail is modelled on uses a rectangular CTA, and a pill there reads as a
+ * different component than the nav rows directly beneath it.
  */
 button.stBaseButton-primary,
 [data-testid="stBaseButton-primary"],
 button[data-testid="stBaseButton-primary"] {
     background-color: var(--isip-accent) !important;
     border: 1px solid var(--isip-accent) !important;
-    border-radius: 999px !important;
+    border-radius: var(--isip-radius) !important;
     color: #0A0A0B !important;
     font-family: var(--isip-font-sans) !important;
     font-weight: 600 !important;
@@ -399,32 +448,35 @@ button.stBaseButton-secondary:hover,
  *
  * which lands the rule on the element that actually wraps the answer.
  *
- * The match is a PREFIX selector, not an exact one, and that is load-bearing:
- * an element's key must be unique per widget on the page, so the caller
- * suffixes the role key (`isip-answer-7`, `isip-answer-turn_42`). Streamlit
- * turns the whole key into ONE class token — `st-key-isip-answer-7` — which an
- * exact `.st-key-isip-answer` selector would miss. `[class^=]` matches the
- * token wherever the suffix leads, so a keyed role keeps its styling no matter
- * how the caller makes its keys unique.
+ * The match is a SUBSTRING selector, not an exact one, and not a prefix one
+ * either. Streamlit puts the whole key into ONE class token —
+ * `st-key-isip-answer-7` — alongside its own tokens, so an exact
+ * `.st-key-isip-answer` selector misses the suffixed key, and the token is not
+ * even first in the attribute: measured in Streamlit 1.65, a keyed element
+ * reads `class="stElementContainer element-container st-key-isip-answer-7
+ * st-emotion-cache-… e6x7pi3"`, so `[class^="st-key-…"]` matches nothing at
+ * all. `[class*="st-key-isip-answer"]` matches the token wherever Streamlit
+ * decides to order it, and however the caller makes the key unique.
  *
- * The same prefix match is also the hazard: "starts with isip-answer" is a wide
- * net, so a widget keyed `isip-answer-retry` inherits this accent border. The
- * prefixes are reserved by chat._ANSWER_KEY / chat._QUESTION_KEY and must not
- * be reused by any other component — a retry button is `isip-chat-retry`,
- * hero buttons are `isip-suggestion-*`, the sidebar uses `isip-session-*` and
- * `isip-param-*`. Pick a new prefix rather than borrowing one.
+ * The same substring match is also the hazard: it is a wide net, so a widget
+ * keyed `isip-answer-retry` inherits this accent border. The prefixes are
+ * reserved by their owning module constants and must not be reused by any other
+ * component — a retry button is `isip-chat-retry`, the rail's nav is
+ * `isip-nav-*` (sidebar), hero buttons are `isip-suggestion-*` (chat), and the
+ * conversation rows are `isip-session-*`. Pick a new prefix rather than
+ * borrowing one.
  */
-[class^="st-key-isip-answer"] {
+[class*="st-key-isip-answer"] {
     border-left: 2px solid var(--isip-accent);
     padding-left: 0.85rem;
 }
 
-[class^="st-key-isip-question"] {
+[class*="st-key-isip-question"] {
     padding-left: 0.15rem;
 }
 
 /* User questions sit one step back from the answers: dimmer, no rule. */
-[class^="st-key-isip-question"] [data-testid="stMarkdownContainer"] {
+[class*="st-key-isip-question"] [data-testid="stMarkdownContainer"] {
     color: var(--isip-text-muted);
 }
 
@@ -471,19 +523,28 @@ button.stBaseButton-secondary:hover,
 
 /*
  * The composer. `st.chat_input` is pinned to the bottom by Streamlit's own
- * `stBottomBlockContainer`; this block only gives the dock its background and
- * keeps the textarea on the 8px radius.
+ * `stBottomBlockContainer`; this block owns the dock's surface and gives it the
+ * large radius, so the one input the user types into is the softest, most
+ * obviously *the* control on the canvas.
  */
 [data-testid="stBottomBlockContainer"] {
     background-color: var(--isip-bg);
-    padding-bottom: 0.75rem;
+    padding-bottom: 0.85rem;
 }
 
 [data-testid="stChatInput"] {
     background-color: var(--isip-surface);
     border: 1px solid var(--isip-border);
-    border-radius: var(--isip-radius);
-    padding: 0.15rem;
+    border-radius: var(--isip-radius-lg);
+    padding: 0.3rem;
+    transition:
+        border-color 140ms ease,
+        box-shadow 140ms ease;
+}
+
+[data-testid="stChatInput"]:focus-within {
+    border-color: var(--isip-border-strong);
+    box-shadow: 0 0 0 3px var(--isip-accent-soft);
 }
 
 [data-testid="stChatInputTextArea"] {
@@ -491,6 +552,8 @@ button.stBaseButton-secondary:hover,
     border: none !important;
     color: var(--isip-text) !important;
     font-family: var(--isip-font-sans) !important;
+    font-size: 0.95rem !important;
+    padding: 0.55rem 0.65rem !important;
     box-shadow: none !important;
 }
 
@@ -659,6 +722,295 @@ button.stBaseButton-secondary:hover,
     margin: 0.3rem 0 0 0;
 }
 
+/* --- the brand mark ----------------------------------------------------- */
+
+/*
+ * One mark, two sizes. The tile is pure CSS — a gradient squircle with two
+ * `--isip-bg` bars stamped on it, i.e. a ledger line — because the design
+ * system forbids structural emoji and ships no image assets: a glyph would
+ * depend on a font the container may not have. The bar geometry is in
+ * percentages so the hero variant only has to change the box.
+ */
+.isip-mark {
+    display: inline-block;
+    position: relative;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border-radius: var(--isip-radius-small);
+    background-image: linear-gradient(155deg, var(--isip-accent-strong), var(--isip-accent));
+}
+
+.isip-mark::before,
+.isip-mark::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    height: 2px;
+    border-radius: 999px;
+    background-color: var(--isip-bg);
+}
+
+.isip-mark::before {
+    top: 33%;
+    width: 46%;
+}
+
+.isip-mark::after {
+    top: 55%;
+    width: 28%;
+}
+
+/* --- the rail's fixed rows ---------------------------------------------- */
+
+/*
+ * Brand row, section label and the bottom identity/status card. Three separate
+ * emitters rather than one fragment because Streamlit renders each `st.html`
+ * call as its own element container: a `<div>` opened in one call cannot be
+ * closed around widgets a later call emits in between.
+ */
+
+.isip-rail-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.1rem 0.15rem 0.9rem 0.15rem;
+}
+
+.isip-rail-names {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.isip-rail-wordmark {
+    font-family: var(--isip-font-sans);
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--isip-text);
+}
+
+.isip-rail-subtitle {
+    font-family: var(--isip-font-sans);
+    font-size: 0.68rem;
+    color: var(--isip-text-dim);
+}
+
+/* The muted upper-case section label ("PREVIOUS CONVERSATIONS"). Sits a step
+   below `isip-label` in size, because the rail is the app's densest column. */
+.isip-rail-label {
+    font-family: var(--isip-font-sans);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--isip-text-dim);
+    margin: 0.45rem 0 0.4rem 0.15rem;
+}
+
+/* The bottom card: raised one step off the rail's surface so it reads as an
+   object status rather than another list row. */
+.isip-rail-card {
+    background-color: var(--isip-surface-2);
+    border: 1px solid var(--isip-border);
+    border-radius: var(--isip-radius);
+    padding: 0.7rem 0.8rem;
+    margin-top: 0.6rem;
+}
+
+.isip-rail-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+}
+
+.isip-rail-card-title {
+    font-family: var(--isip-font-sans);
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--isip-text);
+}
+
+.isip-rail-card-line {
+    font-family: var(--isip-font-sans);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--isip-text-muted);
+}
+
+/* --- the rail's nav buttons --------------------------------------------- */
+
+/*
+ * Four `st.button`s keyed `isip-nav-<view>`. Streamlit's button is a centred
+ * flex row, which is right for the pill CTA and wrong for a nav item: these go
+ * left-aligned on the rail's own surface, sharing the 8px radius of every other
+ * row control in the rail. The rules are scoped to the reserved key token so no
+ * other button on the page can pick them up, and Streamlit's own `stSidebarNav`
+ * is a different testid entirely.
+ *
+ * The *selected* view is the one the sidebar renders as `type="primary"`, and
+ * Streamlit marks that with `data-testid="stBaseButton-primary"` — NOT with a
+ * `.stBaseButton-primary` class, measured in 1.65. That distinction is
+ * load-bearing here: the flat-item rules below are `:not(...)`-scoped to the
+ * primary, because clearing the background unconditionally would leave the
+ * selected item as dark-on-dark text with its fill cancelled out. The selected
+ * item keeps the pill rule's fill from the primary-action section above and only
+ * takes the squared corners from here, so an active nav item reads as a row
+ * rather than as the app's CTA.
+ */
+[class*="st-key-isip-nav"] button {
+    justify-content: flex-start !important;
+    text-align: left !important;
+    border-radius: var(--isip-radius-small) !important;
+    font-weight: 500 !important;
+}
+
+/*
+ * Streamlit's own button markup centres through TWO nested wrappers:
+ * `button > div(justify:center) > span(justify:center)`. Left-aligning the button
+ * element alone is not enough — measured in the browser, the labels still sat on a
+ * centre line, so "Documents" and "Diagnostics" began at different x positions and
+ * the nav read as an off-grid list. Both wrappers are pulled to the start and given
+ * the full width the alignment needs to be visible.
+ */
+[class*="st-key-isip-nav"] button > div,
+[class*="st-key-isip-nav"] button > div > span {
+    justify-content: flex-start !important;
+    width: 100% !important;
+}
+
+[class*="st-key-isip-nav"] button:not([data-testid="stBaseButton-primary"]) {
+    background-color: transparent !important;
+    border-color: transparent !important;
+    color: var(--isip-text-muted) !important;
+}
+
+[class*="st-key-isip-nav"] button:not([data-testid="stBaseButton-primary"]):hover {
+    background-color: var(--isip-surface-2) !important;
+    border-color: var(--isip-border) !important;
+    color: var(--isip-text) !important;
+}
+
+/* --- the hero (empty-state canvas) -------------------------------------- */
+
+/*
+ * The canvas's empty state stacks centred fragments: mark, title, subtext,
+ * eyebrow, the chip grid, then the footer line under the composer. Each
+ * fragment is its own `st.html` container, so centring is per-fragment
+ * (`text-align`) plus `margin: auto` for the width-limited ones, rather than a
+ * flex parent that cannot exist across containers.
+ */
+
+.isip-hero {
+    text-align: center;
+    margin: 0.5rem 0 0.35rem 0;
+}
+
+.isip-hero-mark {
+    display: block;
+    width: 46px;
+    height: 46px;
+    margin: 0 auto;
+    border-radius: var(--isip-radius-lg);
+    box-shadow: 0 8px 24px var(--isip-accent-soft);
+}
+
+.isip-hero-mark::before,
+.isip-hero-mark::after {
+    height: 3px;
+}
+
+.isip-hero-title {
+    font-family: var(--isip-font-sans);
+    font-size: clamp(1.55rem, 3vw, 2.15rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    color: var(--isip-text);
+    text-align: center;
+    margin: 0.2rem 0 0.55rem 0;
+}
+
+/* The accented word in the title (the reference layout's coloured name). */
+.isip-hero-accent {
+    color: var(--isip-accent);
+}
+
+.isip-hero-sub {
+    max-width: 33rem;
+    margin: 0 auto;
+    font-family: var(--isip-font-sans);
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: var(--isip-text-muted);
+    text-align: center;
+}
+
+/* The small upper-case kicker above the chip grid. */
+.isip-eyebrow {
+    font-family: var(--isip-font-sans);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--isip-text-dim);
+    text-align: center;
+    margin: 1.4rem 0 0.5rem 0;
+}
+
+/* One muted status line under the composer — the app's last word on a page. */
+.isip-footer {
+    font-family: var(--isip-font-sans);
+    font-size: 0.7rem;
+    line-height: 1.4;
+    color: var(--isip-text-dim);
+    text-align: center;
+    margin: 0.55rem 0 0.25rem 0;
+}
+
+/* --- the hero's demo chips ---------------------------------------------- */
+
+/*
+ * Six `st.button`s keyed `isip-suggestion-<n>`, laid out by the caller as a
+ * `st.columns(3)` grid. A Streamlit button centres a nowrap label, which is the
+ * wrong shape for a suggestion: these go left-aligned with the icon leading, and
+ * are allowed to wrap, because the demo questions are full sentences and a third
+ * of the canvas is narrow. The height floor keeps the six cells in a grid
+ * looking like cells even when one label wraps to two lines.
+ */
+[class*="st-key-isip-suggestion"] button {
+    justify-content: flex-start !important;
+    text-align: left !important;
+    white-space: normal !important;
+    min-height: 3.2rem !important;
+    height: auto !important;
+    padding: 0.45rem 0.7rem !important;
+    line-height: 1.3 !important;
+}
+
+[class*="st-key-isip-suggestion"] button [data-testid="stMarkdownContainer"] {
+    text-align: left;
+    white-space: normal;
+}
+
+/* The icon leads the label in the accent colour, the way the mark does — except
+   on the selected item, where the fill is already the accent. */
+[class*="st-key-isip-nav"] button [data-testid="stIconMaterial"],
+[class*="st-key-isip-suggestion"] button [data-testid="stIconMaterial"] {
+    color: var(--isip-accent) !important;
+    font-size: 1.05rem !important;
+}
+
+[class*="st-key-isip-nav"] button[data-testid="stBaseButton-primary"]
+    [data-testid="stIconMaterial"] {
+    color: #0A0A0B !important;
+}
+
 /* --- native widgets recast onto the palette ----------------------------- */
 
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
@@ -754,9 +1106,27 @@ button.stBaseButton-secondary:hover,
 def inject_theme() -> None:
     """Emit the design-system stylesheet (tokens + rules) into the current run.
 
-    Called once by ``app.py`` before any component renders. Idempotent within a
-    run: the second call is a no-op, because a duplicated ``<style>`` element
-    would just lose the same race it already won.
+    Called by ``app.py`` on every run, before any component renders, and that
+    *every run* is the whole point: Streamlit removes every element a rerun does
+    not re-send, so a once-per-session guard does not save a duplicate — it
+    deletes the stylesheet. Measured in a real browser on a first load: exactly
+    one ``<style>`` node carrying this block, ``--isip-accent`` live, the rail
+    label upper-cased; after a single unrelated button click, zero such nodes,
+    every custom property gone, and the app back on Streamlit's own chrome. The
+    first click a user makes therefore used to strip the design system. Emitting
+    unconditionally costs one re-sent element per run and keeps the CSS in place.
+
+    Injection goes through ``st.markdown(..., unsafe_allow_html=True)`` rather
+    than ``st.html``, and that is measured, not stylistic: verified in a real
+    browser, ``st.html`` renders its container but drops the ``<style>`` element,
+    so the whole design system silently did not apply (the app still *looked*
+    dark only because Streamlit's own default theme is dark). ``st.html`` is
+    still correct for the helper markup below, which does land.
+
+    The base palette is ALSO set natively in ``.streamlit/config.toml``. That is
+    not redundant: Streamlit paints its own widgets (sliders, inputs, the canvas)
+    from its theme tokens, so CSS alone leaves them on the default red accent
+    while our surfaces are orange.
 
     The fonts arrive as a single ``@import`` inside the same block. That is the
     documented Streamlit way (there is no build step, and a ``<link>`` to a
@@ -764,13 +1134,10 @@ def inject_theme() -> None:
     request serializes behind the stylesheet, which is acceptable at two
     families and is why the fallback stacks exist.
     """
-    if st.session_state.get(INJECTED_KEY):
-        return
     block = (
         "<style>\n" f"{_FONT_IMPORT_CSS}\n" f"{_token_block()}\n" f"{_STYLESHEET_BODY}\n" "</style>"
     )
-    st.html(block)
-    st.session_state[INJECTED_KEY] = True
+    st.markdown(block, unsafe_allow_html=True)
 
 
 #: ``@import`` must be the first rule in a stylesheet, ahead of ``:root``.
@@ -934,3 +1301,140 @@ def spacer(size: str | None = None) -> None:
     """
     style = f' style="--isip-spacer-size: {_escape(size)}"' if size else ""
     _emit(f'<div class="{_class_list("isip-spacer")}"{style}></div>')
+
+
+# --- layout helpers: the rail's rows -------------------------------------------
+
+
+def rail_brand(name: str, subtitle: str | None = None) -> None:
+    """Render the rail's brand row: the mark, then the wordmark stack.
+
+    Parameters
+    ----------
+    name:
+        The wordmark (``IsipFin``).
+    subtitle:
+        Optional second line under the wordmark, in the dim text colour.
+    """
+    names = (
+        f'<span class="{_class_list("isip-rail-names")}">'
+        f'<span class="{_class_list("isip-rail-wordmark")}">{_escape(name)}</span>'
+    )
+    if subtitle:
+        names += f'<span class="{_class_list("isip-rail-subtitle")}">{_escape(subtitle)}</span>'
+    names += "</span>"
+    _emit(
+        f'<div class="{_class_list("isip-rail-brand")}">'
+        f'<span class="{_class_list("isip-mark")}" aria-hidden="true"></span>'
+        f"{names}"
+        "</div>"
+    )
+
+
+def rail_label(text: str) -> None:
+    """Render the rail's upper-case muted section label (``PREVIOUS CONVERSATIONS``).
+
+    Sibling of :func:`label` rather than a call to it: the label lives in the
+    rail, which is the app's densest column, so it sits one size smaller and
+    owns its own margin.
+    """
+    _emit(f'<div class="{_class_list("isip-rail-label")}">{_escape(text)}</div>')
+
+
+#: How a rail status word maps onto a badge kind. The card takes one free-form
+#: ``badge`` string — the sidebar states ``READY`` or ``NO INDEX`` and nothing
+#: else — so the mapping lives here instead of in the signature. An unlisted
+#: word renders the neutral pill rather than raising, for the same reason
+#: :func:`badge` falls back: a new status string must not break the rail.
+_STATUS_BADGE_KINDS: dict[str, str] = {
+    "READY": "success",
+    "INDEXED": "success",
+    "NO INDEX": "warn",
+    "EMPTY": "warn",
+    "ERROR": "error",
+}
+
+
+def rail_status_card(title: str, lines: Sequence[str], badge: str | None = None) -> None:
+    """Render the rail's bottom identity/status card.
+
+    Parameters
+    ----------
+    title:
+        The card's heading (``Local workspace``).
+    lines:
+        The facts to state, one muted line each. Blank entries are skipped, so a
+        caller can assemble the list conditionally without filtering it.
+    badge:
+        Optional status word for the head row (``READY``). Mapped onto a badge
+        kind by :data:`_STATUS_BADGE_KINDS`; an unlisted word renders neutral.
+    """
+    head = f'<span class="{_class_list("isip-rail-card-title")}">{_escape(title)}</span>'
+    if badge:
+        kind = _STATUS_BADGE_KINDS.get(badge.strip().upper(), "neutral")
+        head += (
+            f'<span class="{_class_list("isip-badge", f"isip-badge-{kind}")}">'
+            f"{_escape(badge)}</span>"
+        )
+    body = "".join(
+        f'<div class="{_class_list("isip-rail-card-line")}">{_escape(line)}</div>'
+        for line in lines
+        if line
+    )
+    _emit(
+        f'<div class="{_class_list("isip-rail-card")}">'
+        f'<div class="{_class_list("isip-rail-card-head")}">{head}</div>'
+        f"{body}"
+        "</div>"
+    )
+
+
+# --- layout helpers: the hero and its footer -----------------------------------
+
+
+def hero_mark() -> None:
+    """Render the centered hero mark: the brand tile at hero size, no wordmark."""
+    _emit(
+        f'<div class="{_class_list("isip-hero")}">'
+        f'<span class="{_class_list("isip-mark", "isip-hero-mark")}" aria-hidden="true"></span>'
+        "</div>"
+    )
+
+
+def hero_title(plain: str, accent: str | None = None) -> None:
+    """Render the hero's centered headline, optionally two-toned.
+
+    Parameters
+    ----------
+    plain:
+        The whole title text.
+    accent:
+        A substring of ``plain`` to render in the accent colour. When it does not
+        occur in ``plain`` (or is ``None``) the whole title renders in the text
+        colour — a caller with a stale word gets a plain title, not a broken one,
+        and the markup stays one coherent fragment either way.
+    """
+    body = _escape(plain)
+    if accent and accent in plain:
+        before, _, after = plain.partition(accent)
+        body = (
+            f"{_escape(before)}"
+            f'<span class="{_class_list("isip-hero-accent")}">{_escape(accent)}</span>'
+            f"{_escape(after)}"
+        )
+    _emit(f'<div class="{_class_list("isip-hero-title")}">{body}</div>')
+
+
+def hero_sub(text: str) -> None:
+    """Render the hero's muted subtext, centered and width-limited."""
+    _emit(f'<div class="{_class_list("isip-hero-sub")}">{_escape(text)}</div>')
+
+
+def eyebrow(text: str) -> None:
+    """Render a small centered upper-case label (``TRY A DEMO``)."""
+    _emit(f'<div class="{_class_list("isip-eyebrow")}">{_escape(text)}</div>')
+
+
+def footer_note(text: str) -> None:
+    """Render the one small muted status line under the composer."""
+    _emit(f'<div class="{_class_list("isip-footer")}">{_escape(text)}</div>')
