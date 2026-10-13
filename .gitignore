@@ -1,5 +1,9 @@
 # Secrets — never commit
 .env
+# Backups of it. Only `.env` was ignored, so a `.env.bak-…` — the kind made before
+# rewriting one — sat untracked and one `git add -A` away from being committed.
+.env.*
+!.env.example
 
 # Runtime state — never commit (mounted as a compose volume)
 data/
