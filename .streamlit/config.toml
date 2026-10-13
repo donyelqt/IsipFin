@@ -1,0 +1,28 @@
+# Streamlit's native theme. This is the primary mechanism for the black/orange
+# design system, and it is deliberately not optional: Streamlit renders its own
+# widgets (sliders, inputs, base canvas) from these tokens, so styling that lives
+# only in CSS leaves them at the default red accent. CSS handles the custom
+# surfaces and helpers; these tokens handle everything Streamlit draws itself.
+#
+# Verified in a real browser: before this file existed the app rendered with
+# Streamlit's default dark (#0E1117) and its default red slider accent, because
+# an injected <style> block does not reach the page (see src/components/theme.py).
+[theme]
+base = "dark"
+primaryColor = "#FF7A1A"
+backgroundColor = "#0A0A0B"
+secondaryBackgroundColor = "#131316"
+textColor = "#F5F5F6"
+font = "sans-serif"
+
+[server]
+headless = true
+
+[client]
+# Hides Streamlit's own toolbar (the Deploy button and the hamburger). It is Streamlit
+# chrome rather than app UI, it overlaps the rail's brand row, and the reference layout
+# this shell is modelled on has nothing in that corner.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
