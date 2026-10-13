@@ -101,8 +101,10 @@ DEFAULT_K = 8
 # Supported metadata filters; anything else is a caller bug, not silently ignored.
 _FILTER_KEYS = ("section", "doc_id")
 
-# Module-level default index location (docs/ARCHITECTURE.md data model).
-_INDEX_DIR = Path("data/index")
+#: Index directory the runtime path resolves. ``INDEX_DIR`` in the environment overrides it:
+#: the mock embedder is 64-dimensional and a real one 384, and a single directory cannot hold
+#: both, so `MOCK_LLM=1` after a real build points this at the mock index instead of rebuilding.
+_INDEX_DIR = Path(os.environ.get("INDEX_DIR", "").strip() or "data/index")
 
 # Process-wide index, resolved on the first module-level call (built/loaded earlier in
 # this process wins; otherwise the disk is read once). Index state is immutable, so the
