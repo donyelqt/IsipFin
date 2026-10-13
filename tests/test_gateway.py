@@ -17,6 +17,13 @@ The invariants pinned are the ones ADR-005 and docs/SPEC.md section 9 freeze:
    ``SchemaViolationError``;
 6. token counts come from the response's usage field and ``latency_ms`` is measured;
 7. the revenue question returns the exact FY2023 figure through the mock.
+
+An eighth invariant is pinned by the same file: the credential chain resolves ``LLM_API_KEY``
+/ ``LLM_BASE_URL`` ahead of the ``OPENAI_*`` names and ahead of ``GROQ_API_KEY`` (whose
+endpoint follows the key), and the configuration it resolved is reportable with the key
+redacted — the diagnostic that makes an ambient ``OPENAI_API_KEY`` silently replacing a key
+written into ``.env`` visible instead of mysterious. The model keeps its single
+protocol-named variable: ``OPENAI_MODEL`` names the wire format, not a vendor.
 """
 
 from __future__ import annotations
@@ -34,6 +41,9 @@ from typing import Any
 
 import pytest
 from src.utils.llm import (
+    DEFAULT_BASE_URL,
+    GROQ_BASE_URL,
+    REDACTED_KEY,
     ChatLLM,
     ChatResult,
     LLMError,
@@ -41,6 +51,8 @@ from src.utils.llm import (
     SchemaViolationError,
     backoff_delay,
     build_llm,
+    resolved_config,
+    resolved_provider,
     validate_json_schema,
 )
 
@@ -156,11 +168,19 @@ def _grounding_messages() -> list[dict[str, str]]:
 
 @pytest.fixture
 def mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The offline path with no key present: ``MOCK_LLM=1`` must not need one."""
+    """The offline path with no key present: ``MOCK_LLM=1`` must not need one.
+
+    Every credential name the gateway can read is cleared — including the ``LLM_*`` and
+    ``GROQ_*`` ones — so the offline path is proven keyless on a host that exports a key,
+    not merely on a host that happens not to.
+    """
     monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
 
 def mock_client() -> Any:
@@ -407,7 +427,9 @@ def test_missing_api_key_raises_auth_before_any_client_is_built(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MOCK_LLM", "0")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     with pytest.raises(LLMError.Auth) as raised:
@@ -691,26 +713,63 @@ def test_grounding_mock_answer_matches_its_schema(mock_mode: None) -> None:
 _REAL_PROBE = """
 import asyncio, json, os
 
-from src.utils.llm import LLMParams, build_llm
+from src.utils.llm import LLMParams, build_llm, resolved_config
 
+resolved = resolved_config()
 try:
     client = build_llm(LLMParams(model=os.environ.get("PROBE_PARAMS_MODEL") or None))
 except Exception as exc:
     print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
 else:
+    expected_key = os.environ.get("PROBE_EXPECT_KEY")
     print(json.dumps({
         "client": type(client).__name__,
         "model": client.model,
         "base_url": str(client.client.base_url),
         "max_retries": client.client.max_retries,
         "timeout": client.client.timeout,
+        "api_key_matches_expected": expected_key is None or client.client.api_key == expected_key,
+        "resolved": {
+            "provider": resolved.provider,
+            "api_key": resolved.api_key,
+            "base_url": resolved.base_url,
+            "model": resolved.model,
+            "key_source": resolved.key_source,
+            "base_url_source": resolved.base_url_source,
+        },
     }))
 """
 
 
+#: Every variable the credential chain can read. The probe clears all of them before the
+#: test's overrides are applied, so what it reports is the environment the test built and
+#: never what the host exported.
+_CREDENTIAL_ENV_NAMES = (
+    "GROQ_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+)
+
+
 def _probe_real_interpreter(**overrides: str) -> dict[str, Any]:
-    """Build one keyed gateway in a child interpreter and return what it reports."""
-    env = {**os.environ, "MOCK_LLM": "0", "OPENAI_API_KEY": "test-key-not-a-secret"}
+    """Build one keyed gateway in a child interpreter and return what it reports.
+
+    The credential variables are cleared first and then the overrides are applied, so an
+    override *is* the environment: passing ``OPENAI_API_KEY=""`` leaves that name unset for
+    the chain (a blank value counts as unset), which is how a test proves that only
+    ``GROQ_API_KEY`` was configured. Without the clearing, this host's exported
+    ``OPENAI_API_KEY`` would decide the outcome of tests about precedence.
+
+    ``PROBE_EXPECT_KEY`` is compared inside the child, so a test can prove which key reached
+    the client without this process — or the probe's output — ever holding it.
+    """
+    env = {**os.environ, "MOCK_LLM": "0"}
+    for name in _CREDENTIAL_ENV_NAMES:
+        env.pop(name, None)
+    env["OPENAI_API_KEY"] = "test-key-not-a-secret"
     env.update(overrides)
     completed = subprocess.run(
         [sys.executable, "-c", _REAL_PROBE],
@@ -768,3 +827,188 @@ def test_per_call_model_overrides_the_environment() -> None:
     )
 
     assert reported["model"] == "gpt-4o"
+
+
+# --- 8. credential precedence: LLM_* > OPENAI_* > GROQ_API_KEY ---------------------
+#
+# The defect these pin: `.env` is loaded with override=False, so a host that exports
+# OPENAI_API_KEY (this one does, with an NVIDIA key) silently wins over whatever a user
+# wrote into `.env`, and the request goes out with the host's credential and endpoint. The
+# LLM_* names outrank it; GROQ_API_KEY is the name a user reaches for and it implies Groq's
+# endpoint. Each precedence is proven independently, in a child interpreter, so the key
+# itself never reaches this process's assertions — only "which variable supplied it" does.
+
+
+def test_llm_api_key_beats_a_hostile_openai_key() -> None:
+    reported = _probe_real_interpreter(
+        LLM_API_KEY="llm-dedicated-key",
+        OPENAI_API_KEY="hostile-ambient-key",
+        PROBE_EXPECT_KEY="llm-dedicated-key",
+    )
+
+    assert "error" not in reported
+    assert reported["api_key_matches_expected"] is True, "the ambient OPENAI_API_KEY was used"
+    assert reported["resolved"]["key_source"] == "LLM_API_KEY"
+    assert reported["resolved"]["api_key"] == REDACTED_KEY
+
+
+def test_llm_base_url_beats_a_hostile_openai_base_url() -> None:
+    reported = _probe_real_interpreter(
+        LLM_BASE_URL=GROQ_BASE_URL,
+        OPENAI_BASE_URL="https://integrate.api.nvidia.com/v1",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["base_url_source"] == "LLM_BASE_URL"
+    assert reported["base_url"].rstrip("/") == GROQ_BASE_URL
+    assert reported["resolved"]["provider"] == "groq"
+
+
+def test_params_model_still_beats_every_environment_variable() -> None:
+    """The sidebar's per-call model keeps winning: that precedence is unchanged."""
+    reported = _probe_real_interpreter(
+        OPENAI_MODEL="hostile-model",
+        PROBE_PARAMS_MODEL="sidebar-chosen-model",
+    )
+
+    assert reported["model"] == "sidebar-chosen-model"
+
+
+def test_groq_key_alone_implies_the_groq_base_url() -> None:
+    """One variable is a working Groq configuration, which is what the name implies."""
+    reported = _probe_real_interpreter(
+        GROQ_API_KEY="gsk-groq-only-key",
+        OPENAI_API_KEY="",
+        PROBE_EXPECT_KEY="gsk-groq-only-key",
+    )
+
+    assert "error" not in reported
+    assert reported["api_key_matches_expected"] is True
+    assert reported["resolved"]["key_source"] == "GROQ_API_KEY"
+    assert reported["resolved"]["base_url_source"] == "GROQ_API_KEY"
+    assert reported["base_url"].rstrip("/") == GROQ_BASE_URL
+    assert reported["resolved"]["provider"] == "groq"
+
+
+def test_a_configured_base_url_beats_the_groq_fallback() -> None:
+    """The Groq URL follows the key only when no endpoint is configured anywhere."""
+    reported = _probe_real_interpreter(
+        GROQ_API_KEY="gsk-groq-only-key",
+        OPENAI_API_KEY="",
+        OPENAI_BASE_URL="http://localhost:8000/v1",
+    )
+
+    assert reported["resolved"]["base_url_source"] == "OPENAI_BASE_URL"
+    assert "localhost:8000" in reported["base_url"]
+    assert reported["resolved"]["provider"] == "local"
+
+
+def test_the_defaults_are_unchanged_when_no_new_variable_is_set() -> None:
+    """With no ``LLM_*``/``GROQ_*`` set, the chain lands exactly where it used to."""
+    reported = _probe_real_interpreter()
+
+    assert reported["resolved"]["key_source"] == "OPENAI_API_KEY"
+    assert reported["resolved"]["base_url"] == DEFAULT_BASE_URL
+    assert reported["base_url"].rstrip("/") == DEFAULT_BASE_URL
+    assert reported["resolved"]["provider"] == "openai"
+    assert reported["model"] == "gpt-4o-mini"
+    assert reported["resolved"]["base_url_source"] is None
+
+
+def test_missing_key_message_names_every_variable_a_user_can_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The primary error a user hits must name the new chain, not just OPENAI_API_KEY."""
+    monkeypatch.setenv("MOCK_LLM", "0")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    with pytest.raises(LLMError.Auth) as raised:
+        build_llm(LLMParams())
+
+    message = str(raised.value)
+    assert "LLM_API_KEY" in message
+    assert "OPENAI_API_KEY" in message and "GROQ_API_KEY" in message
+    assert "MOCK_LLM=1" in message
+    assert raised.value.attempts is None
+
+
+def test_mock_mode_short_circuits_before_any_credential_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``MOCK_LLM=1`` returns the mock with keys present — and never resolves them.
+
+    The resolver is replaced with a function that fails, so this is a proof that the chain
+    was not read rather than a claim that it did not matter.
+    """
+    from src.utils import llm as gateway
+    from src.utils.mock_llm import MockLLM
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setenv("LLM_API_KEY", "llm-key-that-must-not-be-read")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-key-that-must-not-be-read")
+
+    def explode() -> Any:
+        raise AssertionError("MOCK_LLM=1 must return before any credential is read")
+
+    monkeypatch.setattr(gateway, "_resolve_credentials", explode)
+
+    assert isinstance(build_llm(LLMParams()), MockLLM)
+
+
+def test_resolved_config_redacts_the_key_and_names_what_won(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The diagnostic the gateway lacked: what did this process actually resolve?
+
+    Every four-character window of the real key is searched for, so a leaked prefix fails
+    as loudly as printing the key would.
+    """
+    secret = "gsk_this-prefix-must-not-leak-9f3a71c6"
+    monkeypatch.setenv("LLM_API_KEY", secret)
+    monkeypatch.setenv("OPENAI_API_KEY", "hostile-ambient-key")
+    monkeypatch.setenv("LLM_BASE_URL", GROQ_BASE_URL)
+    monkeypatch.setenv("OPENAI_MODEL", "env-chosen-model")
+
+    resolved = resolved_config()
+
+    assert resolved.key_source == "LLM_API_KEY"
+    assert resolved.api_key == REDACTED_KEY
+    assert resolved.base_url == GROQ_BASE_URL
+    assert resolved.base_url_source == "LLM_BASE_URL"
+    assert resolved.model == "env-chosen-model"
+    assert resolved.provider == "groq"
+    assert resolved_provider() == "groq"
+    rendered = repr(resolved) + str(resolved)
+    assert all(secret[index : index + 4] not in rendered for index in range(len(secret) - 3))
+    assert rendered.count(secret) == 0
+
+
+def test_the_redaction_mask_is_fixed_length_and_independent_of_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mask whose length tracked the key would leak the key's length."""
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    short_key = resolved_config().api_key
+    monkeypatch.setenv("LLM_API_KEY", "gsk_" + "x" * 96)
+    long_key = resolved_config().api_key
+
+    assert short_key == long_key == REDACTED_KEY
+    assert "gsk_" not in long_key
+    assert resolved_provider() == "openai", "an unset endpoint resolves to OpenAI's"
+
+
+def test_no_key_resolves_to_none_and_an_empty_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing to talk to: the diagnostic says so instead of inventing a provider."""
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    resolved = resolved_config()
+
+    assert resolved.provider is None
+    assert resolved_provider() is None
+    assert resolved.api_key == "" and resolved.key_source is None
