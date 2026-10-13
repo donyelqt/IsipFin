@@ -41,11 +41,12 @@ are the whole configuration. The model name is provider-agnostic — `OPENAI_MOD
 the OpenAI-compatible wire protocol, not a vendor — so `openai/gpt-oss-120b` (Groq),
 `nvidia/nemotron-3-super-120b-a12b` (NVIDIA) and `llama3` (Ollama) all answer through the
 same variable. Embeddings need no key at all: they default to a local model inside the
-container (§1.1). Setting **only** `GROQ_API_KEY` is enough to run chat against Groq —
-the endpoint follows the key name. If your shell already exports `OPENAI_API_KEY` or
-`OPENAI_BASE_URL`, a value you write for those in `.env` is ignored — see
-§Troubleshooting. Runtime state (`data/`) is a named Docker volume, so uploaded PDFs,
-the built index, and chat history survive `docker compose down` and rebuilds.
+container (§1.1). Setting **only** `GROQ_API_KEY` runs chat against Groq **when no base
+URL is configured anywhere** — including an ambient export in your shell. If your shell
+already exports `OPENAI_API_KEY` or `OPENAI_BASE_URL`, say so in `.env` too: a value you
+write there for those names now wins (see §Troubleshooting). Runtime state (`data/`) is a
+named Docker volume, so uploaded PDFs, the built index, and chat history survive
+`docker compose down` and rebuilds.
 
 **Mock and real indexes are not interchangeable.** `MOCK_LLM=1` swaps in the
 deterministic offline embedder, which vectors text at **64 dimensions**, while the
@@ -118,16 +119,25 @@ repo's own `.env` ships `MOCK_LLM=1`, the local embeddings default is only exerc
 `MOCK_LLM=0` or unset.
 
 `.env` is loaded with `load_dotenv(override=False)` (`src/utils/settings.py`), so a
-**real environment variable always beats the file**: exporting `OPENAI_API_KEY`,
-`EMBEDDING_PROVIDER` or `MOCK_LLM` on the host overrides whatever `.env` says, which is
-how CI and a grader's machine inject a key without editing the file.
+**real environment variable normally beats the file**: exporting `EMBEDDING_PROVIDER`,
+`INDEX_DIR` or `MOCK_LLM` on the host overrides whatever `.env` says, which is how CI and a
+grader's machine inject a value without editing the file. The exception is deliberate and
+narrow: the seven variables that decide **which provider a request is aimed at** — the key,
+the endpoint and the model, in their `OPENAI_*`, `LLM_*` and `GROQ_*` spellings — are
+authoritative **in the file**, so a credential you typed into this repo's own config is
+never silently overridden by an unrelated export. Everything else still loses to the
+environment. A blank value in `.env` (as `.env.example` ships `OPENAI_API_KEY=`) is "unset
+here" and never clobbers a real one.
 
 ### 1.2 Mock vs real credentials
 
 The only thing to set for a real model is `OPENAI_API_KEY` plus `OPENAI_MODEL`; a Groq-only
 setup needs just `GROQ_API_KEY`. Everything beyond that — which name wins when several are
 set, and what to do when the shell already exports `OPENAI_*` — is a failure-mode detail,
-so it lives in §Troubleshooting instead of the getting-started path.
+so it lives in §Troubleshooting instead of the getting-started path. One consequence is
+worth stating up front, because it bites silently: `GROQ_API_KEY` implies Groq's endpoint
+only when **no base URL is configured anywhere**, and a base URL exported in your shell
+counts — a Groq key sent to some other endpoint fails with an unhelpful 401/404.
 
 Switching `EMBEDDING_PROVIDER` or the model changes the vector width and invalidates any
 index built with the previous provider — build into a fresh `--index-dir` or delete
@@ -294,12 +304,12 @@ regression (it needs the index built, and a real key for the real-LLM mode).
 
 **First question when a chat call fails with an auth error: is `OPENAI_*` already set in
 your shell?** Run `echo $OPENAI_API_KEY` (PowerShell: `$env:OPENAI_API_KEY`) and
-`echo $OPENAI_BASE_URL`. If either prints something, it is not your `.env` — a real
-environment variable beats the file (`load_dotenv(override=False)`, `src/utils/settings.py`),
-so whatever you wrote for `OPENAI_API_KEY` or `OPENAI_BASE_URL` in `.env` is **silently
-ignored** and the request goes out with the ambient credentials, failing with an
-unhelpful 401/404. Two provider-neutral names sit ahead of the `OPENAI_*` pair so a
-dedicated chat credential can never be hijacked that way:
+`echo $OPENAI_BASE_URL`. If either prints something, that export used to make whatever you
+wrote for `OPENAI_API_KEY` or `OPENAI_BASE_URL` in `.env` **silently ignored**, and the
+request went out with the ambient credentials, failing with an unhelpful 401/404. That is no
+longer true for the names that aim a request: a value in `.env` now wins over the export
+(see §1.1). Two provider-neutral names sit ahead of the `OPENAI_*` pair, and they win from
+either source, so a dedicated chat credential can never be hijacked that way:
 
 | Variable | Beats | Purpose |
 |---|---|---|
@@ -311,20 +321,25 @@ Resolution order, first hit wins:
 - **key:** `LLM_API_KEY` → `OPENAI_API_KEY` → `GROQ_API_KEY`
 - **base URL:** `LLM_BASE_URL` → `OPENAI_BASE_URL` → Groq's
   `https://api.groq.com/openai/v1` **when the key came from `GROQ_API_KEY`** and no base
-  URL is set anywhere
+  URL is set anywhere — *including your shell*: an exported `OPENAI_BASE_URL` counts as
+  "set anywhere" and stops the Groq fallback
 - **model:** `OPENAI_MODEL` → the built-in default (a per-call model override in the UI
   still wins)
 
-**The fix:** write `LLM_API_KEY` and `LLM_BASE_URL` in `.env` instead of the `OPENAI_*`
-names; those win from either source. The model needs no alias, because the `OPENAI_*` names
-describe the **protocol**, not the vendor — the same variable carries
-`openai/gpt-oss-120b` (Groq), `nvidia/...` (NVIDIA) and `llama3` (Ollama). Setting **only**
-`GROQ_API_KEY` still works: the endpoint follows the key name.
+**The fix:** write `LLM_API_KEY` and `LLM_BASE_URL` in `.env` — or set `OPENAI_API_KEY` /
+`OPENAI_BASE_URL` there, which now beats an export — and both win from either source. The
+model needs no alias, because the `OPENAI_*` names describe the **protocol**, not the
+vendor — the same variable carries `openai/gpt-oss-120b` (Groq), `nvidia/...` (NVIDIA) and
+`llama3` (Ollama). Setting **only** `GROQ_API_KEY` works when nothing else configures an
+endpoint, but it is not enough on a shell that exports `OPENAI_BASE_URL`: name the endpoint
+too (`LLM_BASE_URL=https://api.groq.com/openai/v1`) and the one-variable promise holds
+anywhere.
 
 **To see which one actually won**, ask the gateway instead of guessing:
 `resolved_config()` / `resolved_provider()` (`src/utils/llm.py`) report the provider, base
 URL and model that were resolved, with the key always redacted. If they name a provider you
-did not configure, another environment variable is winning; set the `LLM_*` names.
+did not configure, a name that is neither in `.env` nor in the allowlist is being read from
+the environment — write the provider-aiming value into `.env`, or export the `LLM_*` names.
 
 **A 400 on `response_format` / `json_schema`** is a model-choice problem, not a credential
 one: pick a model that supports it (see §1.1).
