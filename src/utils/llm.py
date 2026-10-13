@@ -7,6 +7,19 @@ is testable with a stub and a provider change is a ``base_url`` env change — O
 OpenAI, Ollama (``http://localhost:11434/v1``), vLLM or Groq
 (``https://api.groq.com/openai/v1``) all work without a code edit.
 
+**Credential resolution.** The chat key and endpoint are resolved first-hit-wins:
+``LLM_API_KEY`` → ``OPENAI_API_KEY`` → ``GROQ_API_KEY`` for the key, and ``LLM_BASE_URL`` →
+``OPENAI_BASE_URL`` → Groq's URL (only when the key came from ``GROQ_API_KEY`` and no base
+URL is configured anywhere) for the endpoint. The model is ``params.model`` →
+``OPENAI_MODEL`` → :data:`DEFAULT_MODEL`. Those two overrides exist for exactly the settings
+an ambient environment demonstrably hijacks, because ``.env`` is loaded with
+``override=False``: a real environment variable beats the file, so on a host that already
+exports ``OPENAI_API_KEY`` and ``OPENAI_BASE_URL`` a credential written into ``.env`` is
+silently ignored and the ambient one is sent instead — which is the failure
+:func:`resolved_config` exists to make visible, with the key redacted. The model needs no
+override: ``OPENAI_MODEL`` names the OpenAI-compatible wire protocol rather than a vendor, so
+that one variable already addresses OpenAI, Groq, NVIDIA and Ollama.
+
 **Retry policy (ADR-005).** HTTP 429 and HTTP 5xx are retried with capped exponential
 backoff plus jitter — ``min(1s * 2**(attempt-1), 30s)`` with half-fixed/half-random
 jitter — for at most ``MAX_ATTEMPTS = 3`` attempts (one call plus two retries); a third
@@ -43,11 +56,14 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 __all__ = [
     "BACKOFF_BASE_S",
     "BACKOFF_CAP_S",
+    "GROQ_BASE_URL",
     "MAX_ATTEMPTS",
+    "REDACTED_KEY",
     "REQUEST_TIMEOUT_S",
     "Auth",
     "ChatClient",
@@ -57,12 +73,15 @@ __all__ = [
     "LLMError",
     "LLMParams",
     "RateLimited",
+    "ResolvedConfig",
     "SchemaViolationError",
     "Timeout",
     "backoff_delay",
     "build_llm",
     "default_jitter",
     "default_sleep",
+    "resolved_config",
+    "resolved_provider",
     "validate_json_schema",
 ]
 
@@ -70,11 +89,41 @@ __all__ = [
 # These names are duplicated from scripts/build_index.py on purpose: utils must not import
 # from scripts (which is not a package), and the two modules must agree on the env surface.
 MOCK_ENV = "MOCK_LLM"
+
+# The chat key and endpoint are resolved first-hit-wins:
+#
+#   key:      LLM_API_KEY  -> OPENAI_API_KEY -> GROQ_API_KEY
+#   base URL: LLM_BASE_URL -> OPENAI_BASE_URL -> Groq's URL, but only when the key came
+#             from GROQ_API_KEY and no base URL is configured anywhere
+#   model:    OPENAI_MODEL -> DEFAULT_MODEL (params.model beats both)
+#
+# WHY THE TWO LLM_* OVERRIDES EXIST — AND WHY THE MODEL HAS NONE: src/utils/settings.py
+# loads .env with override=False, so a real environment variable always beats the file.
+# This host exports OPENAI_API_KEY and OPENAI_BASE_URL, so a credential written into .env
+# under those names is silently ignored and the ambient pair is used instead — a Groq key
+# sent to an NVIDIA endpoint, for instance. The overrides therefore cover exactly the two
+# settings an ambient environment demonstrably hijacks. The model is neither host-set nor
+# vendor-specific: OPENAI_MODEL names the OpenAI-compatible wire protocol, so the same
+# variable addresses OpenAI, Groq, NVIDIA and Ollama, and a second name for it would be
+# surface without purpose. GROQ_API_KEY exists because that is the name a user reaches for,
+# and it implies Groq's base URL so that one variable is a working Groq configuration.
+LLM_KEY_ENV = "LLM_API_KEY"
+LLM_BASE_URL_ENV = "LLM_BASE_URL"
 API_KEY_ENV = "OPENAI_API_KEY"
 BASE_URL_ENV = "OPENAI_BASE_URL"
 MODEL_ENV = "OPENAI_MODEL"
+GROQ_KEY_ENV = "GROQ_API_KEY"
+#: Groq's OpenAI-compatible chat endpoint: the fallback that makes ``GROQ_API_KEY`` alone work.
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+
+#: Fixed-length stand-in for the credential in diagnostics: no prefix, no length and no
+#: character of the key, so a resolved configuration is always safe to log or assert on.
+REDACTED_KEY = "***"
+
+#: Hosts reported as ``local`` by :func:`resolved_provider` (Ollama, vLLM, in-box gateways).
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
 
 #: Maximum attempts per request: one call plus two retries (ADR-005).
 MAX_ATTEMPTS = 3
@@ -205,10 +254,11 @@ class ContextLength(LLMError):
 
 
 class Auth(LLMError):
-    """HTTP 401/403: missing, wrong or revoked ``OPENAI_API_KEY``.
+    """HTTP 401/403: missing, wrong or revoked chat credential.
 
-    The message names the env var and never the key itself, so it is safe to render
-    (ADR-007: "never leaks the key").
+    The credential is whichever of ``LLM_API_KEY``, ``OPENAI_API_KEY`` or ``GROQ_API_KEY``
+    resolved first; the message names the variables a user can set and never the key
+    itself, so it is safe to render (ADR-007: "never leaks the key").
     """
 
 
@@ -442,9 +492,15 @@ def _map_provider_error(exc: BaseException) -> LLMError:
             f"model request timed out ({detail or type(exc).__name__})", status=status
         )
     if status in (401, 403) or isinstance(exc, auth_classes):
+        source = resolved_config().key_source
+        where = (
+            f"the credential in use came from {source}"
+            if source is not None
+            else "no credential resolved"
+        )
         hint = (
-            f"{API_KEY_ENV} is missing, wrong or revoked; set it (and optionally "
-            f"{BASE_URL_ENV}), or run with {MOCK_ENV}=1 for the offline demo path."
+            f"the chat key ({LLM_KEY_ENV}, {API_KEY_ENV} or {GROQ_KEY_ENV}) is missing, wrong "
+            f"or revoked: {where}; or run with {MOCK_ENV}=1 for the offline demo path."
         )
         return LLMError.Auth(f"model authentication failed: {hint}", status=status)
     if status == 429 or isinstance(exc, rate_limit_classes):
@@ -707,31 +763,153 @@ def _is_retryable(error: LLMError) -> bool:
     return error.retryable or (status is not None and 500 <= status < 600)
 
 
-# --- the one factory --------------------------------------------------------------
+# --- the one factory: credential resolution, then the client -----------------------
+#
+# Resolution is a pure function of the environment so that build_llm and the diagnostic
+# helpers below cannot drift: both read the chain through _resolve_credentials and
+# _select_model, and a test can assert on what was chosen without constructing a client.
+
+
+@dataclass(frozen=True)
+class _Credentials:
+    """The raw credential set — the key here is real, so it never leaves this module."""
+
+    api_key: str
+    key_source: str | None
+    base_url: str
+    base_url_source: str | None
+
+
+@dataclass(frozen=True)
+class ResolvedConfig:
+    """What the gateway resolved, with the credential replaced by :data:`REDACTED_KEY`.
+
+    ``provider`` is derived from the endpoint's host rather than from which variable
+    supplied the key, because the host is where the request actually goes — reporting
+    ``groq`` for a Groq URL is what makes a key/endpoint mismatch visible. ``provider`` is
+    ``None`` exactly when no key resolved at all, i.e. when :func:`build_llm` would raise
+    :class:`LLMError.Auth`; ``api_key`` is :data:`REDACTED_KEY` or ``""``, never a key and
+    never a prefix or length of one.
+    """
+
+    provider: str | None
+    api_key: str
+    base_url: str
+    model: str
+    key_source: str | None
+    base_url_source: str | None
+
+
+def _first_env(*names: str) -> tuple[str, str | None]:
+    """The first non-blank ``name=value`` among ``names``, with the name that supplied it.
+
+    A variable set to whitespace counts as unset, exactly as the single-name lookups did
+    before the chain existed, so ``OPENAI_API_KEY=`` cannot shadow a later ``GROQ_API_KEY``.
+    """
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, name
+    return "", None
+
+
+def _resolve_credentials() -> _Credentials:
+    """The key and endpoint, first-hit-wins, per the chain documented at the config block.
+
+    The Groq endpoint follows ``GROQ_API_KEY`` only when the key came from there *and* no
+    base URL is configured anywhere: the fallback exists so that setting that one variable
+    yields a working Groq configuration, which is what the name promises, and it never
+    overrides an endpoint the user spelled out.
+    """
+    api_key, key_source = _first_env(LLM_KEY_ENV, API_KEY_ENV, GROQ_KEY_ENV)
+    base_url, base_url_source = _first_env(LLM_BASE_URL_ENV, BASE_URL_ENV)
+    if not base_url and key_source == GROQ_KEY_ENV:
+        base_url, base_url_source = GROQ_BASE_URL, GROQ_KEY_ENV
+    return _Credentials(
+        api_key=api_key,
+        key_source=key_source,
+        base_url=base_url or DEFAULT_BASE_URL,
+        base_url_source=base_url_source,
+    )
+
+
+def _select_model(params: LLMParams | None) -> str:
+    """The model a build would configure: ``params.model``, else ``OPENAI_MODEL``, else default.
+
+    The per-call override keeps winning over every variable — the sidebar's picker writes
+    ``params.model``, and that precedence is part of the frozen contract.
+    """
+    requested = params.model if params is not None else None
+    return requested or os.environ.get(MODEL_ENV, "").strip() or DEFAULT_MODEL
+
+
+def _provider_label(base_url: str) -> str:
+    """A short label for where requests go: ``groq``, ``openai``, ``local`` or the rest.
+
+    The label comes from the host, not from the variable that supplied the key, so a Groq
+    key aimed at an NVIDIA endpoint reports the endpoint — the mismatch is the point.
+    """
+    host = (urlsplit(base_url).hostname or "").lower()
+    if host.endswith("groq.com"):
+        return "groq"
+    if host.endswith("openai.com"):
+        return "openai"
+    if host in _LOOPBACK_HOSTS:
+        return "local"
+    return "openai-compatible"
+
+
+def resolved_config(params: LLMParams | None = None) -> ResolvedConfig:
+    """The configuration :func:`build_llm` would use, with the key redacted.
+
+    No client is constructed and ``openai`` is never imported, so callers and tests can ask
+    *what did this process resolve* — the question this module could not previously answer,
+    which is what let an ambient ``OPENAI_API_KEY`` silently replace a key written into
+    ``.env``. ``params`` mirrors :func:`build_llm`: when given, its ``model`` is the
+    resolved one.
+    """
+    credentials = _resolve_credentials()
+    return ResolvedConfig(
+        provider=_provider_label(credentials.base_url) if credentials.api_key else None,
+        api_key=REDACTED_KEY if credentials.api_key else "",
+        base_url=credentials.base_url,
+        model=_select_model(params),
+        key_source=credentials.key_source,
+        base_url_source=credentials.base_url_source,
+    )
+
+
+def resolved_provider() -> str | None:
+    """The provider the gateway would talk to, or ``None`` when no key resolved."""
+    return resolved_config().provider
 
 
 def build_llm(params: LLMParams | None = None) -> ChatClient:
     """Build the gateway for this process: the offline mock, or a real-compatible client.
 
     ``MOCK_LLM=1`` returns :class:`src.utils.mock_llm.MockLLM` — deterministic, offline,
-    no key needed. Otherwise a real client is built from ``OPENAI_API_KEY`` (mandatory;
-    ``OPENAI_BASE_URL`` selects OpenAI, Azure, Ollama, vLLM, Groq…) and ``OPENAI_MODEL``
-    (overridable per call through ``params.model``). No node constructs a client itself:
-    this factory is the single place configuration is read, which is what keeps the graph
-    testable with a stub client and the demo runnable with no key at all.
+    no key needed; that branch decides before any credential is read, so an ambient
+    ``OPENAI_API_KEY`` cannot affect it. Otherwise a real client is built from the
+    first-hit-wins chain documented at the config block: the key from ``LLM_API_KEY``,
+    ``OPENAI_API_KEY`` or ``GROQ_API_KEY`` (the last implying Groq's base URL), the
+    endpoint from ``LLM_BASE_URL`` or ``OPENAI_BASE_URL``, and the model from
+    ``OPENAI_MODEL``, overridable per call through ``params.model``. No node constructs
+    a client itself: this factory is the single place configuration is read, which is what
+    keeps the graph testable with a stub client and the demo runnable with no key at all.
     """
     if os.environ.get(MOCK_ENV, "").strip() == "1":
         from src.utils.mock_llm import MockLLM
 
         return MockLLM()
 
-    api_key = os.environ.get(API_KEY_ENV, "").strip()
-    if not api_key:
+    credentials = _resolve_credentials()
+    if not credentials.api_key:
         raise LLMError.Auth(
-            f"chat needs a key: {API_KEY_ENV} is not set and {MOCK_ENV} is not '1'. Either "
-            f"export {API_KEY_ENV} (and optionally {BASE_URL_ENV} / {MODEL_ENV}), or run "
-            f"with {MOCK_ENV}=1 for the deterministic offline path that needs no key and "
-            "no network."
+            f"chat needs a key: none of {LLM_KEY_ENV}, {API_KEY_ENV} or {GROQ_KEY_ENV} is "
+            f"set and {MOCK_ENV} is not '1'. Either export {LLM_KEY_ENV} — or "
+            f"{GROQ_KEY_ENV}, whose endpoint follows the key — with {LLM_BASE_URL_ENV} / "
+            f"{MODEL_ENV} as needed, or run with {MOCK_ENV}=1 for the deterministic "
+            "offline path that needs no key and no network."
         )
     try:
         from openai import AsyncOpenAI
@@ -741,18 +919,12 @@ def build_llm(params: LLMParams | None = None) -> ChatClient:
             f"or use {MOCK_ENV}=1 for the offline demo path"
         ) from exc
 
-    base_url = os.environ.get(BASE_URL_ENV, "").strip() or None
-    model = (
-        (params.model if params is not None else None)
-        or os.environ.get(MODEL_ENV, "").strip()
-        or DEFAULT_MODEL
-    )
     client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url or DEFAULT_BASE_URL,
+        api_key=credentials.api_key,
+        base_url=credentials.base_url,
         timeout=REQUEST_TIMEOUT_S,
         # This gateway owns the retry policy; the SDK's own retries are disabled so a 429
         # is attempted three times in total, not three times per SDK-level attempt.
         max_retries=0,
     )
-    return ChatLLM(client, model=model)
+    return ChatLLM(client, model=_select_model(params))
