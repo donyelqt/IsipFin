@@ -759,3 +759,52 @@ def test_meta_structured_flags_match_the_output_schema_kind() -> None:
             assert "JSON" in schema or "Result" in schema or "Plan" in schema, schema
         else:
             assert "JSON" not in schema, schema
+
+
+# --- 8. the table-citation contract matches what checks.split_units can read -------
+
+
+def test_p4_prescribes_the_table_marker_placement_the_pre_pass_can_read() -> None:
+    """Rule 1 and rule 4 must name the same placement.
+
+    P4 v1.0.0's rule 1 said "a source note *under* the table lists the ``[n]`` markers",
+    while its own rule 4 said "place the ``[n]`` marker in the row label cell … per-cell
+    when cells come from different blocks". ``checks.split_units`` reads a table's markers
+    from the rows themselves plus the single line immediately introducing the table — a
+    note below the table is outside the block, so the rows inherit nothing and every row is
+    trimmed as ``figure_not_in_span``. Golden case q03 hit exactly that: both rows trimmed,
+    ``figure_ok: False``.
+
+    The prompt promised a placement the symbolic layer cannot read, so the prompt was the
+    wrong side and this is the assertion that keeps the two rules from drifting apart
+    again: a marker in a *note* is not a citation the verifier can see.
+    """
+
+    rules = _fenced_rules("P4")
+
+    assert "row label cell" in rules, "rule 4's placement must stay prescribed"
+    assert "per-cell" in rules, "rule 4's per-block placement must stay prescribed"
+    # The corrected wording must survive the edit, and the contradictory one must not return.
+    assert "Put the [n] marker in the table itself" in rules
+
+
+def test_p4_no_longer_prescribes_a_source_note_as_a_citation() -> None:
+    """The precise regression: "a source note under the table lists the markers".
+
+    Kept as its own assertion because the rule 1 wording is the thing that was wrong, and a
+    rewrite of the surrounding sentence must not smuggle the same instruction back in.
+    """
+
+    rules = _fenced_rules("P4")
+
+    assert "source note under the table lists the [n] markers" not in rules
+    assert "A source note under the table" not in rules
+
+
+def _fenced_rules(prompt_id: str) -> str:
+    """The prompt's fenced rules block — the text the node sends the model verbatim."""
+
+    doc = load_prompt(prompt_id)
+    blocks = re.findall(r"^```[^\n]*\n(.*?)^```", doc.body, re.S | re.M)
+    assert blocks, f"{prompt_id} carries no fenced rules block"
+    return "\n".join(blocks)

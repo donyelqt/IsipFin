@@ -59,7 +59,8 @@ _FAMILY_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 # Schema-signature families (ADR-005's "schema presence" half of the fingerprint): the
-# required top-level keys of the two structured outputs in src/chains/schemas.py.
+# required top-level keys of the two structured outputs — QUERY_PLAN_SCHEMA
+# (src/chains/nodes/analyze.py) and GROUNDING_SCHEMA (src/chains/nodes/verify.py).
 _SCHEMA_FAMILIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("query_plan", frozenset({"kind", "sub_queries", "required_sections"})),
     ("grounding", frozenset({"claims", "all_supported"})),

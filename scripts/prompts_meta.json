@@ -42,7 +42,7 @@
       "min_version": "1.0.0",
       "structured": true,
       "output_schema": "QueryPlan",
-      "schema_module": "src/chains/schemas.py",
+      "schema_module": "src/chains/nodes/analyze.py",
       "temperature": 0.0,
       "on_failure": "retry once with stricter nudge, else classify out_of_scope + planner_degraded flag"
     },
@@ -68,7 +68,7 @@
       "min_version": "1.0.0",
       "structured": true,
       "output_schema": "GroundingResult",
-      "schema_module": "src/chains/schemas.py",
+      "schema_module": "src/chains/nodes/verify.py",
       "temperature": 0.0,
       "appends": ["P4"],
       "on_failure": "pessimistic default: treat the answer as ungrounded and trim claims"

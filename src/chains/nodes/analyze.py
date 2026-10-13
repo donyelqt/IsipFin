@@ -43,6 +43,23 @@ The node is synchronous (see :mod:`src.chains.nodes.contextualize` for why ``gra
 requires it) and drives the one awaitable with ``asyncio.run``. Classification stays neural,
 all routing stays symbolic (ADR-010): the plan is data, and the router's decision is a table
 lookup over it.
+
+One gap is not the model's to judge
+-----------------------------------
+ADR-010's split is "deterministic structure owns control and verification; neural models do the
+semantic work where they earn their place". A question naming a fiscal year the catalog cannot
+cover is a *control* question, not a semantic one — the catalog is the ingest-time record of
+what is on disk, and the coverage is exactly the set ``refuse`` reads to write "the documents
+cover fiscal years FY2021-FY2023". So :func:`~src.chains.checks.year_coverage_gap` settles it
+symbolically, before any POST: the fiscal-year sibling of the numeric pre-pass
+``groundedness_check`` runs on figures, moved from the answer to the route.
+
+The gate is narrow on purpose, because it only ever *adds* a refusal and never overrides the
+planner: it fires solely for a question naming exactly one fiscal year that lies outside the
+catalog's coverage. It stays out of the way of a comparison (several periods asked), an
+entity- or topic-gap question (the catalog holds no entity list to compare against), and a
+question naming no period at all (nothing to compare). Those remain the planner's judgement,
+where they belong.
 """
 
 from __future__ import annotations
@@ -53,6 +70,7 @@ import logging
 from dataclasses import replace
 from typing import Any
 
+from src.chains.checks import asked_years, catalog_years, year_coverage_gap
 from src.chains.state import DocSummary, GraphState, QueryPlan
 from src.utils.llm import LLMError, LLMParams, SchemaViolationError, build_llm
 from src.utils.prompts import assert_min_version, node_meta
@@ -115,16 +133,16 @@ MAX_CATALOG_CHARS = 12_000
 #: The ``QueryPlan`` JSON schema handed to the gateway's typed-output path (ADR-005: the JSON
 #: nodes request ``response_format={"type": "json_schema", ...}``).
 #:
-#: Provenance is recorded honestly: ``docs/ARCHITECTURE.md`` and ``ADR-005`` place the shared
-#: ``QueryPlan``/``GroundingResult`` schemas in ``src/chains/schemas.py``, and that module does
-#: not exist in this tree yet (it arrives with the JSON-node split). Rather than import a
-#: module that is not there, this node declares the schema it actually needs and the gateway
-#: validates against what it is handed. The shape matches the QueryPlan the docs freeze, with
-#: one deliberate addition: an ``enum`` over ``kind`` (absent from the informative schema in
-#: ``docs/prompts/query-analysis.md``), so a plan with an unrecognised ``kind`` is a schema
-#: violation the gateway retries on and this node then degrades on — instead of a malformed
-#: plan the router would have to second-guess. Removing this literal in favour of the shared
-#: module is the goal; it is written here so the node is testable now.
+#: Provenance is recorded honestly: ``docs/ARCHITECTURE.md`` carries the ``QueryPlan`` shape in
+#: the ``GraphState`` schema, ``src/chains/state.py`` holds the runtime ``QueryPlan`` dataclass,
+#: and ``ADR-005`` records where the JSON schemas are declared — inline in the node that sends
+#: each one: this module's ``QUERY_PLAN_SCHEMA`` and ``GROUNDING_SCHEMA`` in
+#: ``src/chains/nodes/verify.py``. No shared schema module exists in this tree, so this node
+#: declares the schema it needs and the gateway validates against what it is handed. The shape
+#: matches the QueryPlan the docs freeze, with one deliberate addition: an ``enum`` over
+#: ``kind`` (absent from the informative schema in ``docs/prompts/query-analysis.md``), so a
+#: plan with an unrecognised ``kind`` is a schema violation the gateway retries on and this
+#: node then degrades on — instead of a malformed plan the router would have to second-guess.
 QUERY_PLAN_SCHEMA: dict[str, Any] = {
     "title": "QueryPlan",
     "type": "object",
@@ -257,6 +275,49 @@ def _catalog_json(docs: list[DocSummary]) -> str:
         # receives, so a truncation cannot look like a smaller catalog by accident.
         return f"{text[:MAX_CATALOG_CHARS]}\n... (catalog truncated)"
     return text
+
+
+def _covered_years(docs: list[DocSummary]) -> set[int]:
+    """The fiscal years the catalog's own text shows, as :func:`checks.catalog_years` reads them.
+
+    The catalog is the only record the node has of what is on disk, and it is read here with
+    exactly the same rule ``refuse`` applies when it writes "the documents cover fiscal years
+    FY2021-FY2023" — filenames and section paths, with an annual report's own year standing for
+    the three-year span its statements carry. Sharing the rule rather than restating it is what
+    makes the gate and the refusal copy agree about coverage by construction.
+    """
+
+    parts: list[str] = []
+    for doc in docs:
+        parts.append(doc.filename)
+        parts.extend(_section_text(path) for path in (doc.sections or ()))
+    return catalog_years(" ".join(parts))
+
+
+def _uncovered_period_plan(question: str, covered: set[int]) -> QueryPlan:
+    """The ``out_of_scope`` plan the symbolic fiscal-year gate produces for an uncovered year.
+
+    ``missing_aspect`` is ``time_period`` — the same value P1's own schema expects and
+    ``refuse`` renders as "the documents cover fiscal years FY2021-FY2023" — so the
+    deterministic gate and the planner's own classification land on one indistinguishable
+    outcome. The gap is a fact about the catalog, not about the question's phrasing, so the
+    plan records the asked year in ``fiscal_period`` and leaves ``sub_queries`` and
+    ``required_sections`` empty: there is nothing to retrieve and nothing to decompose.
+    """
+
+    asked = sorted(asked_years(question))
+    logger.info(
+        "year_coverage_gate: %s is outside the catalog's fiscal years %s; routing to refuse",
+        asked,
+        sorted(covered),
+    )
+    return QueryPlan(
+        kind=KIND_OUT_OF_SCOPE,
+        sub_queries=[],
+        required_sections=[],
+        fiscal_period=str(asked[0]) if asked else None,
+        missing_aspect=MISSING_TIME_PERIOD,
+    )
 
 
 def _params(state: GraphState) -> LLMParams:
@@ -421,14 +482,23 @@ def analyze_question(state: GraphState) -> dict[str, Any]:
     A missing prompt asset still raises: that is an infrastructure bug, not a model failure
     (ADR-007's typed-error spine).
 
+    One question never reaches the planner at all: a question naming exactly one fiscal year
+    the catalog demonstrably does not cover. That gap is a fact about the catalog rather than
+    a judgement about the question, so it is settled symbolically by
+    :func:`~src.chains.checks.year_coverage_gap` before any POST — the same split of
+    deterministic-structure vs. neural-semantics ADR-010 draws, applied to the routing
+    decision instead of the answer.
+
     Returns:
         ``{"query_plan": plan}``, plus ``"planner_degraded": True`` when the plan was
-        degraded, plus the accounting key when a gateway call succeeded.
+        degraded, plus the accounting key when a gateway call succeeded. A gated question
+        returns only the plan: no gateway call was made, so there is no accounting to report.
     """
 
     question = _standalone_question(state)
     system, template = _prompt_parts()
-    catalog = _catalog_json(_documents(state))
+    docs = _documents(state)
+    catalog = _catalog_json(docs)
     params = _params(state)
 
     if not question:
@@ -436,6 +506,21 @@ def analyze_question(state: GraphState) -> dict[str, Any]:
         # raises ``GraphStateError``), so reaching here means a node was invoked directly.
         # An empty question plans nothing and must not be routed to retrieval.
         raise ValueError("analyze_question received no question to plan")
+
+    # --- the symbolic fiscal-year gate (ADR-010), before any model call ---------------
+    # A year the documents cannot cover is decided by the catalog, not by the planner: the
+    # catalog is the same ingest-time record ``refuse`` reads to name its coverage, so the
+    # gate is settled deterministically and the question never pays for a POST whose answer
+    # it does not need. It is the fiscal-year sibling of the numeric pre-pass
+    # ``groundedness_check`` runs on figures, moved earlier in the graph.
+    #
+    # The gate is deliberately narrow — it fires only for a question naming exactly one
+    # fiscal year, and only when that year lies outside the catalog's own coverage — so it
+    # never overrides the planner on a comparison, an entity- or topic-gap question, or a
+    # question naming no period at all. Everything else still routes through the planner.
+    covered = _covered_years(docs)
+    if year_coverage_gap(covered, question):
+        return {"query_plan": _uncovered_period_plan(question, covered)}
 
     try:
         result = asyncio.run(

@@ -98,7 +98,7 @@ in place.
 |---|---|---|---|---|---|---|
 | 1 | GTM process failure — new prompts written but never wired | Yes | M | H | `load_prompt("P3")` pattern; version asserted in node tests (`docs/prompts/README.md` rule 5) | Node test fails loudly → revert to last prompt version; prompts are files, revert is one commit |
 | 2 | Delayed market entry — prompts left at v1.0.0, golden never run | Yes | M | H | T17 scheduled before journal writing; journal §5 template requires observed before/after | Ship v1.0.0 with an honest "no iteration was needed" line rather than an invented iteration |
-| 3 | Internal misalignment — prompt and node disagree on schema | Yes | L | M | `QueryPlan`/`GroundingResult` schemas live in `src/chains/schemas.py`, referenced by both | Schema-validation unit test at T10 catches it |
+| 3 | Internal misalignment — prompt and node disagree on schema | Yes | L | M | `QueryPlan`/`GroundingResult` schemas are declared once each, beside the node that sends them (`QUERY_PLAN_SCHEMA` — `src/chains/nodes/analyze.py`; `GROUNDING_SCHEMA` — `src/chains/nodes/verify.py`); each prompt's informative block restates the same shape | Schema-validation unit test at T10 catches it |
 | 4 | External forces — model provider changes JSON behavior | Yes | M | M | MOCK_LLM mode decouples tests from provider quirks; gateway retries once on schema violation | Bridge shim: coerce provider-specific JSON into our schema, recorded in journal |
 | 5 | Regulatory risk | No | — | — | n/a (no compliance surface) | — |
 | 6 | Unexpected cannibalization — P4 formatting rules contradict P3 synthesis rules | Yes | M | L | P4 is explicitly an *appendix* to P3/P5, one rule set, versioned together | Merge P4 into P3 as one file — duplication removed, not patched |

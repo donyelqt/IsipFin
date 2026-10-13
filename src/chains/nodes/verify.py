@@ -13,7 +13,9 @@ This node is ADR-010's neuro-symbolic split in miniature:
   (``docs/prompts/summarization-and-verification.md``) judges what the checker cannot settle:
   computed metrics (a margin is arithmetic, not a printed figure), scope matching (a segment
   subtotal read as consolidated), and qualitative claims. The prompt is instructed to only
-  judge the surviving claims and never to re-litigate the checker's rejections.
+  judge the surviving claims and never to re-litigate the checker's rejections, and it is
+  given the context blocks those claims cite — the union of their ``[n]`` markers, every block
+  when none of them cites anything — so P5 never pays prefill for blocks no claim rests on.
 
 Both halves converge on one outcome: claims the verifier trims are replaced with a visible
 ``(unsupported claim removed)`` marker, and ``grounded`` is set ``False``. A wrong or missing
@@ -39,8 +41,9 @@ call, so an answer it settles alone costs no gateway round trip at all.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
 from src.chains.checks import (
@@ -74,10 +77,11 @@ NODE_NAME = "groundedness_check"
 #: be deterministic". A ``params.temperature`` from the sidebar still overrides it.
 DEFAULT_TEMPERATURE = 0.0
 
-#: P5's output schema (``grounding result``). Declared here because
-#: ``src/chains/schemas.py`` belongs to a later task (T16) and the gateway needs the shape now;
-#: the shape is the one ``src/utils/mock_llm.py`` fingerprints on, so the mock and the real
-#: client validate against the same contract.
+#: P5's output schema (``grounding result``). Declared here, beside the node that sends it:
+#: ``ADR-005`` records the JSON schemas as inline in the node that consumes each one, and there
+#: is no shared schema module — the other declaration is ``QUERY_PLAN_SCHEMA`` in
+#: ``src/chains/nodes/analyze.py``. The shape is the one ``src/utils/mock_llm.py`` fingerprints
+#: on, so the mock and the real client validate against the same contract.
 GROUNDING_SCHEMA: dict[str, Any] = {
     "title": "GroundingResult",
     "type": "object",
@@ -144,18 +148,41 @@ def _system_prompt() -> str:
     return prompt.body
 
 
-def _payload(answer: str, blocks: Mapping[int, str]) -> str:
-    """The user turn P5 receives: the trimmed answer plus the numbered context blocks.
+def _payload(answer: str, blocks: Mapping[int, str], units: Iterable[ClaimUnit]) -> str:
+    """The user turn P5 receives: the trimmed answer plus the context blocks it must judge.
 
     The answer is the already-trimmed one, so the claims the pre-pass rejected are simply not
     there for the model to re-read — which is how P5's "do not re-litigate spans the checker
     already rejected" is enforced structurally rather than by instruction alone. The claims
     that remain in it are exactly the ones this node needs a verdict for.
+
+    Only the blocks those claims actually cite are sent — the union of their ``[n]``
+    markers. P5 judges a claim against the span that claim cites, so the blocks behind every
+    *other* claim are dead weight the node was paying for: a measured real-provider call
+    sent 21.0 KB of context over ~6,900 prompt tokens and spent 20.7 s on what is one
+    prefill-dominated POST, for an answer citing one of the seven blocks it shipped. A marker
+    pointing at a block that does not exist is skipped, because there is nothing to send for
+    it, and the numbering is never rewritten — the answer's ``[n]`` is the marker the model
+    is asked about, so renumbering the context would silently re-point every citation.
+
+    When no claim cites anything — the citation-free answer P5's primary rule exists to
+    catch — every block is sent. Judging a claim against an empty context and then trimming
+    it for what the context did not contain would punish the caller for what this node chose
+    not to show.
     """
 
+    cited = sorted({marker for unit in units for marker in unit.markers if marker in blocks})
+    numbers = cited if cited else sorted(blocks)
     lines = ["CANDIDATE ANSWER:", answer, "", "CONTEXT:"]
-    for number in sorted(blocks):
+    for number in numbers:
         lines.append(f"[{number}] {blocks[number]}")
+    logger.debug(
+        "%s sending %d of %d context block(s) to P5: %s",
+        NODE_NAME,
+        len(numbers),
+        len(blocks),
+        numbers,
+    )
     return "\n".join(lines).strip()
 
 
@@ -180,32 +207,104 @@ def _effective_params(raw: Any) -> LLMParams:
 # --- the LLM verdict, read defensively ----------------------------------------------
 
 
-def _trim_units(payload: Mapping[str, Any], units: list[ClaimUnit]) -> list[ClaimUnit]:
-    """The undecided claims P5 rejected or marked partial, matched by position.
+def _verdicts_by_claim_id(raw: Any) -> dict[int, str]:
+    """The per-claim verdicts a payload names by ``claim_id``, ``claim_id → verdict``.
 
-    P5 answers with a ``claim_id`` for each claim this node listed in ``CLAIMS STILL TO
-    JUDGE``, so the id names the claim — but a model that reports only its own sequential
-    numbering is matched by ordinal position instead. Ids are trusted first, then position;
-    a claim the verdicts cover is trimmed unless its verdict is exactly ``supported``.
+    Returns an empty mapping when no entry carries a usable id, which is what tells
+    :func:`_trim_units` to match by ordinal position instead. An id counts as usable when it is
+    a real integer, or a string whose whole text is one (``"1"``, ``" 1 "``) — a model quoting
+    the schema back is still naming the claim; ``"1 of 2"`` and ``True`` are not, because
+    neither resolves to a single claim. Entries without a verdict string are dropped: they
+    name a claim and say nothing about it, so they must leave that claim to the fallback
+    rather than record a silent rejection.
+
+    An id repeated for two verdicts keeps the pessimistic one. A claim the model both
+    approved and rejected has been answered both ways, and a verifier must read that
+    contradiction as the rejection — the same reading as every other ambiguous input here.
+    """
+
+    verdicts: dict[int, str] = {}
+    if not isinstance(raw, list):
+        return verdicts
+    for claim in raw:
+        if not isinstance(claim, Mapping):
+            continue
+        verdict = claim.get("verdict")
+        if not isinstance(verdict, str):
+            continue
+        key = claim.get("claim_id")
+        if isinstance(key, bool):
+            continue
+        if isinstance(key, int):
+            number = key
+        elif isinstance(key, str) and key.strip().lstrip("+-").isdigit():
+            number = int(key.strip())
+        else:
+            continue
+        verdict = verdict.strip().lower()
+        if verdict == VERDICT_SUPPORTED:
+            # Never let an approval overwrite a rejection already recorded for this id.
+            verdicts.setdefault(number, verdict)
+        else:
+            verdicts[number] = verdict
+    return verdicts
+
+
+def _verdicts_by_position(raw: Any) -> dict[int, str]:
+    """The per-claim verdicts in the order the model listed them, ``1-based position → verdict``.
+
+    The fallback for a payload whose ids are unusable or absent — a model reporting only its
+    own sequential numbering is matched where it actually spoke. Entries without a verdict
+    string are skipped, so the position still occupied by an unreadable row does not become a
+    phantom rejection of the claim standing there.
+    """
+
+    verdicts: dict[int, str] = {}
+    if not isinstance(raw, list):
+        return verdicts
+    for position, claim in enumerate(raw, start=1):
+        if not isinstance(claim, Mapping):
+            continue
+        verdict = claim.get("verdict")
+        if isinstance(verdict, str):
+            verdicts[position] = verdict.strip().lower()
+    return verdicts
+
+
+def _trim_units(payload: Mapping[str, Any], units: list[ClaimUnit]) -> list[ClaimUnit]:
+    """The undecided claims P5 rejected or marked partial, matched by the ``claim_id`` P5 sends.
+
+    P5 asks for a ``claim_id`` per claim, so the id is the contract: this node listed the
+    undecided claims in document order — the order the ids it handed out follow — and a
+    verdict is therefore resolved **by id first**. Matching by the position of the entry in
+    the model's list instead — the previous behaviour — silently re-points every verdict by
+    however many claims the model skipped, duplicated or reordered: the live run that
+    motivated this sent ``claim_id: 2`` for a one-claim hand-off, and a positional map reads
+    that as the *second* claim, so a model that numbers off by one can trim a claim its own
+    verdict would have kept, and one that re-lists claim 1 can excuse it.
+
+    Position is the fallback, used only when the payload names no claim by a usable id. An
+    unusable id is ``True``, a non-integer string or a missing field — cases where the entry
+    carries no address any claim could be reached by, so where the model spoke is the only
+    signal left.
+
+    Ids that name no claim handed over are ignored: a verdict for a claim this node did not
+    list is a model mistake about its own input, not a statement about any claim that is
+    here. The reverse is the dangerous direction and is handled — a handed-over claim the
+    verdicts never name is judged by the ``all_supported`` flag, not silently trimmed.
 
     The verdict is read per claim, never from the answer-level ``all_supported`` flag alone:
     that flag is the model's summary, and one bad actor inside a passing answer is exactly the
-    partially-correct claim STRESS-TEST-RAG #2 is about.
+    partially-correct claim STRESS-TEST-RAG #2 is about — ``all_supported: true`` must never
+    rescue a claim whose own verdict is ``unsupported``.
     """
 
     raw = payload.get("claims")
-    verdicts: dict[int, str] = {}
-    if isinstance(raw, list):
-        for position, claim in enumerate(raw, start=1):
-            if not isinstance(claim, Mapping):
-                continue
-            verdict = claim.get("verdict")
-            if isinstance(verdict, str):
-                verdicts[position] = verdict.strip().lower()
+    verdicts = _verdicts_by_claim_id(raw) or _verdicts_by_position(raw)
 
     trimmed: list[ClaimUnit] = []
-    for position, unit in enumerate(units, start=1):
-        verdict = verdicts.get(position, "")
+    for claim_id, unit in enumerate(units, start=1):
+        verdict = verdicts.get(claim_id, "")
         if verdict == VERDICT_SUPPORTED:
             continue
         if not verdict and bool(payload.get("all_supported")):
@@ -230,6 +329,34 @@ def _is_valid(payload: Any) -> bool:
     if not isinstance(payload.get("claims"), list):
         return False
     return isinstance(payload.get("all_supported"), bool)
+
+
+def _locate(text: str, units: Sequence[ClaimUnit]) -> list[tuple[ClaimUnit, int]]:
+    """Where each of ``units``'s claim texts now sits in ``text``, and the units themselves.
+
+    A claim unit is a text plus the offsets it was read at. Stage 1 of this node re-splices
+    the answer, so by the time a unit is trimmed the offsets it carries describe the
+    *untrimmed* answer and no longer address the text being trimmed. A trim is therefore
+    positioned by re-finding the claim's text rather than by trusting a stale offset.
+
+    The search runs forward from the previous unit's end, so units are located in document
+    order and each one is found where the answer actually prints it. A unit whose text is no
+    longer present — the only way this returns no position for it — cannot be trimmed, which
+    is the honest reading: a claim that is not in the answer any more is already gone.
+    """
+
+    located: list[tuple[ClaimUnit, int]] = []
+    cursor = 0
+    for unit in units:
+        wanted = unit.text
+        found = text.find(wanted, cursor) if wanted else -1
+        if found < 0:
+            # Not there: it was trimmed with the whole line, or the answer was rewritten
+            # around it. Either way there is nothing left to splice against.
+            continue
+        located.append((unit, found))
+        cursor = found + len(wanted)
+    return located
 
 
 # --- the node -----------------------------------------------------------------------
@@ -294,7 +421,7 @@ def groundedness_check(state: GraphState) -> dict[str, Any]:
             build_llm(params).chat(
                 [
                     {"role": "system", "content": _system_prompt()},
-                    {"role": "user", "content": _payload(working, blocks)},
+                    {"role": "user", "content": _payload(working, blocks, undecided)},
                 ],
                 params,
                 GROUNDING_SCHEMA,
@@ -303,7 +430,17 @@ def groundedness_check(state: GraphState) -> dict[str, Any]:
         trimmed = _verdict_trimming(result.parsed, undecided)
 
     if trimmed:
-        trimmed_answer = trim_answer(working, trimmed)
+        # ``undecided``'s offsets were measured on ``answer``, not on ``working``: stage 1's
+        # splice has already shortened every line after the first rejected claim. A trim
+        # spliced at the *original* offsets lands mid-word in the trimmed answer — the live
+        # q07 run rendered "Operating margin(unsupported claim removed)" and stacked a second
+        # table of markers below the first — so the units are re-measured against the text
+        # they are about to be spliced into.
+        relocated = [
+            dataclasses.replace(unit, start=start, end=start + len(unit.text))
+            for unit, start in _locate(working, trimmed)
+        ]
+        trimmed_answer = trim_answer(working, relocated)
         if trimmed_answer.strip():
             working = trimmed_answer
         logger.warning(

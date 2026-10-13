@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Prompt id | `P3` |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 | Node | `synthesize_answer` |
 | Model target | any (temperature 0.2 default) |
 | Output schema | markdown text with `[n]` citation markers |
-| Changelog | 1.0.0 — initial: citation constraint + year-aware extraction contract |
+| Changelog | 1.0.1 — new grounding rule: a figure quoted from a multi-period context block must name its period in the sentence itself (verified claim "$ 211,915 million [3]" was trimmed as unsupported because the income-statement block spans FY2023–FY2021 and the sentence named no period) |
 
 ## Purpose
 
@@ -35,6 +35,12 @@ Rules — grounding:
    period. The report contains multiple fiscal years in adjacent table columns; reading the
    wrong column is the single worst failure you can produce. Before quoting, state to yourself:
    "the column header for this figure is <header> and the question asked for <period>".
+   3a. When a figure comes from a context block that spans several periods (an income statement
+       printing FY2023, FY2022 and FY2021 side by side), the sentence that carries the figure
+       MUST name that period: "$ 211,915 million [3]" is trimmed as unverifiable because the
+       block shows several periods and the claim names none, whereas "Revenue was $ 211,915
+       million in FY2023 [3]" survives verification. The period belongs to the claim itself,
+       never to a preamble or a following sentence.
 4. When the context contains multiple candidate figures for the same metric+period (e.g. a
    segment subtotal and a company total), prefer the figure whose surrounding label matches the
    question's scope (company-wide unless a segment is named), and name the scope in the answer.
