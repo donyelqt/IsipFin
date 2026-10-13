@@ -347,9 +347,11 @@ and say why, rather than carrying an invented figure.
 | **Golden QA — mock mode, full aggregate (the only reproducible one)** | `cases failing: none`, exit 0 — refusal correctness **9/9 (1.00) PASS**, wrong-year contamination **0/3+0 PASS**; this row reproduces byte-for-byte, which is the keyless reviewer path | `MOCK_LLM=1 INDEX_DIR=data/index-mock python scripts/eval_rag.py` |
 | Golden QA — mock-mode metrics that stay unmeasurable | retrieval hit-rate@5 2/7 observed, citation presence 1/8, figure match 1/7 — all **N/A**: the mock embedder is a sha256 hash, the mock LLM cites only blocks containing its figure, and the mock answers from scripted phrases | `scripts/eval_rag.py` prints these itself |
 | Embedding provider | **local Hugging Face by default**: `fastembed` 0.9.0 (ONNX Runtime), `BAAI/bge-small-en-v1.5`, 384-dim, 65 MB cached, no key, no `/embeddings` call | `src/core/local_embedder.py`; `EMBEDDING_PROVIDER=local` |
-| Docker cold start | image 1.41 GB uncompressed / 311 MiB compressed; build 321 s; `compose up` 0.63 s; **3.58 s** to `/_stcore/health` 200; `fastembed` model cached on the `data` volume, second load **1.4 s** offline vs 85.6 s first | measured end-to-end; `MOCK_LLM=1` proven download-free under `--network none` |
-| Test suite | **306 passed** (`pytest -q`) | CI command |
-| Gates | `ruff check` clean; `black --check` 52 files unchanged; `mypy src/utils src/chains` clean (18 files); `check_floor.py --repo-wide` clean (51 files); mock eval exit 0 | the exact commands in `.github/workflows/ci.yml` |
+| Docker cold start | image **271.5 MiB** (was 310.9 MiB before the dev-toolchain split, −39.4 MiB); `docker build --no-cache` 188–202 s, warm 1–2 s; `compose up` 0.63 s; container start → first `/_stcore/health` 200 = **1.6–1.7 s**; non-root `uid=10001(appuser)`; healthcheck `starting`→`healthy` at ~4.5 s, and proven to detect failure; named-volume markers survive `down`/`up` and a full rebuild; **469 tests pass inside the container** with no key and no network | verified against every `docs/PLAN.md` T22 criterion; `MOCK_LLM=1` proven download-free under `--network none` |
+| **Real CI** | hosted Ubuntu 24.04 runner on `main` **completed `success`**, run `38461934270`; per-step: ruff `All checks passed!`, black `52 files would be left unchanged`, mypy `no issues found in 18 source files`, floor guard, pytest+coverage, and `docker build --tag isipfin .` | outcomes read from the run log, not asserted |
+| T20 debug panel (live + historical) | picker live-first then newest-first stored rows; live panel carries plan, 5-node path with latency/tokens, 8 retrieval cards; a stored row renders its **persisted** trace + grounded flag, with the two sections the store does not keep reading explicit "not recorded" prose; A's `hybrid_retrieve 79.8 ms` vs B's `10.6 ms` confirms no cross-answer mixing | driven in Chromium on the mock-mode index, DB rows cross-checked |
+| Test suite | **469 passed** (`pytest -q`) — matching the in-container run exactly | CI command |
+| Gates | `ruff check` clean; `black --check` 52 files unchanged; `mypy src/utils src/chains` clean (18 files); `check_floor.py --repo-wide` clean (52 files); mock eval exit 0 | the exact commands in `.github/workflows/ci.yml` |
 | Browser (Chromium, live app) | stylesheet survives reruns (1 `<style>` node, `--isip-accent: #FF7A1A` after each click); 4 nav items + 6 chips render with Material icons; rail width 260px; composer radius 16px; real-provider answer rendered with a citation card to page 44 | §3c — see the correction there about first-paint-only measurement |
 
 **Determinism posture.** Given a provider that behaves this way — three identical planner calls at
@@ -414,6 +416,23 @@ against Groq and no claim here rests on it. Every real-mode number in this secti
 keyed endpoint that was actually available: an NVIDIA-compatible server
 (`https://integrate.api.nvidia.com/v1`) running `nvidia/nemotron-3-super-120b-a12b`, with
 embeddings local throughout.
+
+### Why this pass is mostly verification, and what it found
+
+The previous session's job was *build it*; this one was *prove it, then prove the rest*. Every task box from T20 down was either written-but-never-measured or measured-and-wrong. Verifying them was not ceremony — it is where the remaining defects lived, and most of them were mine.
+
+| Verified | How | Outcome |
+|---|---|---|
+| T20 debug panel, live + historical | Chromium on the mock-mode index, scratch `DATA_DIR`, DB rows cross-checked | **PASS** — both halves real, a stored row's trace byte-identical to the DB row, no cross-answer mixing (A's `hybrid_retrieve` 79.8 ms vs B's 10.6 ms), and the two sections the store keeps render explicit "not recorded" prose instead of empty space |
+| T21 error taxonomy | class-by-class classification + live browser | **found a defect in my own slice.** `GraphError`/`GraphStateError`/`GraphNodeError` and `LocalEmbeddingError` are triggerable and were absent from the classifier, so they reached the user as `Unexpected error: GraphStateError: question is empty` — leaking the internal class name and offering a Retry that cannot succeed on a decision. That is precisely the failure mode the taxonomy existed to remove |
+| T22 Docker | every `docs/PLAN.md` criterion, run for real | **found three more**, also mine: `INDEX_DIR` missing from compose's passthrough (read in three places, documented in the README, silently dropped for anyone who exported it instead of editing `.env`); `LOG_JSON` set by the Dockerfile and compose with **zero** `.py` read sites, because the ADR-007 §1 JSON formatter was never built; and the dev toolchain shipping 31 MiB in the runtime image where nothing imports it and mypy cannot compile |
+| T23 CI | hosted runner, run log read step by step | **green on real infrastructure**, not asserted locally |
+| T24 README | commands and claims audited | one gap closed — nobody had documented that the 64-dim mock index and the 384-dim local index are not interchangeable |
+| T26 submission | `gh api` | **BLOCKED on the owner.** Repo private, all code merged, CI green — but all three reviewers still have `permission: none` |
+
+The pattern is the lesson of the exercise: **the defects that survived were the ones my own acceptance checks enumerated a fixed list for.** The taxonomy was tested against the classes I happened to name; the packaging slice was reviewed against the criteria I happened to write. Both gaps closed only by asking *what can actually happen to a user* rather than *does my list pass*. A verification checklist should be written from the failure surface, never from the implementation.
+
+Two things I also got wrong, recorded rather than smoothed over. I merged a branch that broke `main` with an `ImportError` — two halves of one slice committed separately — caught and fixed in the same session, with both commits saying so plainly. And an agent reported a test count of 304 when the suite was 469; a number that gets trusted is worth recounting.
 
 ## 8. What I cut, and why
 
