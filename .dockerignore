@@ -1,0 +1,27 @@
+# Build context exclusions. Without this the context ships the local virtualenv
+# (~600 MB) and runtime data/ to the daemon on every build, even though every COPY
+# in the Dockerfile is explicit and the image contents are unaffected.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Runtime state — never in the image; it lives on the compose named volume.
+data/
+
+# Secrets and tooling
+.env
+.git/
+.gitignore
+.github/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Docs are copied explicitly by the Dockerfile (docs/prompts/ is a runtime asset),
+# so do not exclude docs/ here.

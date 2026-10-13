@@ -1,0 +1,59 @@
+# IsipFin — the grader's cold-start path (docs/adr/ADR-008-packaging-docker-ci.md):
+#   cp .env.example .env && docker compose up --build   ->  http://localhost:8501
+#
+# One service by design: FAISS and BM25 are in-process artifacts under data/index, so a
+# separate vector-DB service would be a process to babysit for zero benefit at this scale.
+
+name: isipfin
+
+services:
+  app:
+    build:
+      context: .
+    image: isipfin:local
+    ports:
+      - "8501:8501"
+    # `required: false` so `docker compose config`/`up` still work on a fresh clone with no
+    # .env yet; values already in the shell environment win over the file, as usual.
+    env_file:
+      - path: .env
+        required: false
+    # Explicit passthrough of the app's environment surface (docs/RUNBOOK.md). Empty values
+    # are safe: every reader does `os.environ.get(NAME, "").strip() or DEFAULT`. MOCK_LLM
+    # defaults to 1 only when nothing sets it at all — the keyless offline demo path; set it
+    # to 0 in .env for real answers.
+    environment:
+      # Chat credentials — the ADR-005 precedence chain (src/utils/llm.py): LLM_API_KEY
+      # beats OPENAI_API_KEY beats GROQ_API_KEY (which alone implies Groq's base URL), and
+      # LLM_BASE_URL beats OPENAI_BASE_URL. The LLM_* names default to EMPTY, never to a
+      # value, so an unset one cannot shadow a configured OPENAI_*. There is deliberately no
+      # LLM_MODEL: OPENAI_MODEL names the OpenAI-compatible protocol, not a vendor, so it
+      # already addresses Groq / NVIDIA / Ollama and a second name would be surface.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Dense embeddings: local (default — in-process HF/ONNX via fastembed) or api.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      LOCAL_EMBEDDING_MODEL: ${LOCAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      MOCK_LLM: ${MOCK_LLM:-1}
+      DATA_DIR: ${DATA_DIR:-/app/data}
+      LOG_JSON: ${LOG_JSON:-1}
+    volumes:
+      # Index artifacts, data/pdfs/*.pdf and chat.sqlite3 survive `down` and rebuilds.
+      - data:/app/data
+    # Mirrors the image's HEALTHCHECK (Streamlit's /_stcore/health).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request as u; o = u.build_opener(u.ProxyHandler({})); sys.exit(0 if o.open('http://127.0.0.1:8501/_stcore/health', timeout=4).read().strip() == b'ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  data:

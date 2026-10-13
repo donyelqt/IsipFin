@@ -16,6 +16,7 @@
 | `pypdf` | 6.20.1 | per-page text extraction | extraction quirks change per version; cleaning rules are tuned against a version |
 | `pdfplumber` | 0.11.10 | table → markdown extraction | table-detection heuristics are version-sensitive |
 | `openai` | 3.29.0 | OpenAI-compatible chat + embeddings client | client-side retry/response-shape changes |
+| `fastembed` | 0.9.0 | local Hugging Face embeddings (`EMBEDDING_PROVIDER=local`, the default) — ONNX Runtime, no torch | unpinned it drags a moving `onnxruntime` / `huggingface-hub` / `tokenizers` set, and a major bump can change default model dims; the Docker cold-start budget assumes the ONNX wheel, not torch |
 | `python-dotenv` | 1.2.4 | `.env` loading | trivial, but a secret-handling bug here is unacceptable |
 | `pytest` | 9.1.1 | test suite | plugin compatibility |
 | `ruff` | 0.17.0 | lint | rule set changes between versions produce false failures |
@@ -33,7 +34,10 @@ scoped-types constraint is kept — `docs/CONSTRAINTS.md` scopes it to `src/util
 **Recommendation: `python:3.11-slim`** (matches `docs/adr/ADR-008`). Decision factor is
 `faiss-cpu` wheel availability on `cp311` — the 1.15.1 page declares `Python >=3.10` with cp311
 wheels, and pdfplumber is tested through 3.13, so 3.11 is the conservative intersection of
-every dependency's wheel matrix. Re-verify at T22 if the build pulls 3.12 wheels for a pinned
+every dependency's wheel matrix — and `fastembed` 0.9.0 declares `Python >=3.10` (3.11 in
+its classifier list) with a `py3-none-any` wheel over `onnxruntime`, so the local
+embeddings default does not change the base image. Re-verify at T22 if the build pulls
+3.12 wheels for a pinned
 transitive dependency; changing the base image is a one-line change, not a re-architecture.
 
 ## Floor guard wiring
