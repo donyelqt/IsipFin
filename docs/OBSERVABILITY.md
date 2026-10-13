@@ -49,7 +49,13 @@ NodeEvent(node: str, started_at: float, duration_ms: float,
 
 ## Debug panel contract
 
-Sidebar section, collapsed by default. For the selected answer:
+Sidebar section, collapsed by default. The panel renders the selected answer: its picker
+leads with the live answer when there is one (`Current answer (live)`) and then lists the
+session's stored answers, each labelled by its question, so a historical answer is inspected
+by selecting it; a lone candidate renders with no control. A stored answer carries its
+persisted node trace, grounded flag, refusal reason and citations — not the plan or the
+retrieval scores, which the store does not keep — and those sections say "not recorded for
+this answer" rather than drawing an empty block. For the selected answer:
 
 1. **Plan** — `query_plan`: kind, sub_queries, required_sections, fiscal_period,
    missing_aspect.

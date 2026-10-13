@@ -26,9 +26,9 @@ guessed dependency is a finding, not a convenience.
 | Splitting | `RecursiveCharacterTextSplitter` for children; heading-aligned parents | `src/core/chunking.py` |
 | Retrieval | **FAISS** (faiss-cpu 1.15.1, `IndexFlatIP` cosine) + **rank-bm25** 0.2.2, RRF fusion (k=60), parent-document expansion | `src/core/retrieval.py`, `src/core/index.py` |
 | Storage | **SQLite** (`data/chat.sqlite3`, 6 tables, WAL, `busy_timeout` 5s); index artifacts + parsed JSON under `data/` | `src/store/` |
-| UI | **Streamlit** 1.65.0 — `app.py` is a thin UI-only shell (ADR-009) | `app.py`, `src/components/` (**not built yet**, T18–T21) |
-| Observability | stdlib **`logging`** + JSON events + `@trace_node` per-node trace + in-app debug panel. No `structlog` dependency — do not add one (ADR-007). | `src/utils/tracing.py` |
-| Packaging | Docker + docker-compose (one app service, named volume for `data/`), GitHub Actions (**not built yet**, T22–T23) | — |
+| UI | **Streamlit** 1.65.0 — Streamlit-native only: **no** React/Vite/Tailwind and **no** npm/JS build step anywhere (no `package.json`, no `node_modules`); styling is one injected `<style>` block from `theme.py`. `app.py` is the UI shell (ADR-009) and the only non-component file that imports `streamlit` | `app.py`, `src/components/` |
+| Observability | stdlib **`logging`** + JSON events + `@trace_node` per-node trace, persisted per answer as `node_trace_json` in the store (the in-app debug panel would be T20 — not built, see §2). No `structlog` dependency — do not add one (ADR-007). | `src/utils/tracing.py` |
+| Packaging | Docker + docker-compose (one app service, named volume for `data/`), GitHub Actions — recorded unfinished in the plan (**T22–T23**, see §2) | — |
 | Tests | **pytest** 9.1.1 + **pytest-cov** 7.1.0 + **reportlab** 5.0.1 (in-memory PDF fixtures only) | `tests/` |
 | Tooling | **ruff** 0.17.0, **black** 26.10.1, **mypy** 2.4.0 | — |
 
@@ -36,6 +36,60 @@ Config is in `pyproject.toml`: ruff `select = ["E","F","I","W","B","UP","SIM","R
 line-length 100; black `line-length = 100`; mypy `strict = true` scoped to
 `files = ["src/utils", "src/chains"]`. `pytest` uses `addopts = "-q"`,
 `testpaths = ["tests"]`.
+
+### The Streamlit UI (Phase 4 — T18, T19, T21 shipped; T20 not built)
+
+The UI is **Streamlit-native**. There is no React/Vite/Tailwind, no `package.json`, no
+`node_modules`, and no npm build step — do not add one. Styling is a single injected
+`<style>` block (`theme.inject_theme()`, called once by `app.py`), not a component library
+and not a CSS pipeline.
+
+**Boundary rule.** `app.py` is the **only file outside `src/components/`** that may import
+`streamlit`, and it is a UI shell: it sets page config, injects the theme, calls the
+components, runs the graph, and persists the turn. No component carries business logic, and
+none *calls* the pipeline — the single entry is `src.chains.graph.invoke()`, whose
+`AnswerEnvelope` is the one object that crosses into the UI (ADR-009). Components may import
+leaf-level constants and contract types they render with (`LLMParams`, `DEFAULT_K`, and
+`AnswerEnvelope` under `TYPE_CHECKING`) but never retrieval/prompt/gateway **logic**.
+
+The one deliberate exception to "the UI only calls the graph": `app.py:_ask` temporarily
+sets `src.chains.nodes.retrieve.RETRIEVE_K` around the `invoke()` call (restored in a
+`finally`) so the sidebar's retrieval-`k` slider takes effect without changing the frozen
+graph signature.
+
+**Components** (`src/components/` — one responsibility each, all four import `streamlit`):
+
+- `theme.py` — the **single token source** and the design system: `TOKENS` (the palette,
+  the radius scale, the font stacks), the injected stylesheet (`inject_theme`), and small
+  HTML helpers (`panel`, `label`, `figure`, `badge`, `caption_note`, `spacer`). Every other
+  component imports its colors/classes from here — never hard-code a hex, radius, or font.
+  Shipped palette: bg `#0A0A0B`, surface `#131316`, surface-2 `#1B1B20`, border `#2A2A31`,
+  text `#F5F5F6`, muted `#9A9AA3`, dim `#6C6C76`, accent `#FF7A1A`, accent-strong `#FF9347`,
+  accent-dim `rgba(255,122,26,0.14)`, success `#3FB950`, warning `#D29922`, error `#F85149`;
+  radii 10px panels / 8px inputs / pill CTA; IBM Plex Sans + Plex Mono.
+- `chat.py` — the canvas (T18/T21): the hero empty state with suggestion buttons, the
+  transcript, the live/stored answer, citation cards, the pending bubble, the error block
+  with a retry action, and the composer.
+- `upload.py` — the ingest surface (T18/T21): multi-PDF uploader, index-build progress, the
+  document catalog and the index status. It is the one place the UI drives a pipeline step,
+  and it reuses `scripts/build_index.py`'s catalog format and embedder policy by importing
+  it, never re-implementing it.
+- `sidebar.py` — the left rail (T19): brand + "New conversation" CTA, document status
+  (hosts `upload.render_upload_panel`), the session manager (new/switch/rename/delete, all
+  on the store), the model-parameter controls (assembled into `LLMParams`), and the account
+  row. One `render_sidebar` call returns a `SidebarResult`; nothing durable lives in
+  `st.session_state` but the rail's own bookkeeping keys.
+
+The debug panel (T20, planned as `src/components/debug_panel.py` per `docs/PLAN.md`) is
+**not built**: `app.py` persists each answer's `node_trace` to the store as
+`node_trace_json`, but no component renders it yet.
+
+**The rail width (`initial_sidebar_state=260`).** Streamlit computes the sidebar width in
+JS and applies it as an **inline** style on `stSidebar`; no CSS rule — not even
+`!important` — can override an inline style. The rail's 260px width therefore **must** come
+from `st.set_page_config(initial_sidebar_state=260)` in `app.py:main()` (260 is inside
+Streamlit's 200–600 integer range). `theme.py` deliberately does not set the width — it owns
+only the rail's surface, hairline and padding.
 
 ---
 
@@ -128,6 +182,7 @@ python scripts/download_corpus.py --url <candidate>           # install (magic-b
 ```bash
 streamlit run app.py                       # http://localhost:8501
 python scripts/demo_script.py              # 6-step demo script under MOCK_LLM=1
+grep -rl "import streamlit" src/           # UI boundary: only src/components/* (4 files)
 ```
 
 ### Golden QA (second testing layer — deliberately *not* pytest)
@@ -154,11 +209,13 @@ canary stays live in both modes.
 
 ### Not built yet (do not invent a command for these)
 
-`Dockerfile` / `docker-compose.yml` (T22), `.github/workflows/ci.yml` (T23), `README.md`
-(T24), and `src/components/*` plus the Streamlit body of `app.py` (T18–T21). A top-level
-`prompts/` directory does not exist either — the prompt assets live in `docs/prompts/`,
-deliberately (see §3). `pip install -e .` is not a path used anywhere; the package is
-installed editable once at setup so `import src.*` resolves from any cwd.
+`src/components/debug_panel.py` (T20 — see §1). Phase-5 packaging is still recorded as
+unfinished in `docs/PLAN.md` / `docs/TODO.md` — `Dockerfile` / `docker-compose.yml` (T22),
+`.github/workflows/ci.yml` (T23), `README.md` (T24) — check that record (and the working
+tree) before documenting or running a command for any of them. A top-level `prompts/`
+directory does not exist either — the prompt assets live in `docs/prompts/`, deliberately
+(see §3). `pip install -e .` is not a path used anywhere; the package is installed editable
+once at setup so `import src.*` resolves from any cwd.
 
 ---
 
@@ -172,10 +229,10 @@ convention.
 - Every module opens with a docstring that states its contract *and* cites the source
   (`ADR-00N`, `docs/SPEC.md §9`, `docs/STRESS-TEST-RAG.md row N`). A comment explains
   **why** (trade-offs, invariants, gotchas) and never restates the code.
-- `from __future__ import annotations` at the top of every module — all 31 non-empty
-  modules (the 8 `__init__.py` package markers are empty and carry no imports). Type hints
-  on every public function.
-- `__all__` in modules with an explicit public surface (13 of the 20 non-`__init__.py`
+- `from __future__ import annotations` at the top of every non-`__init__.py` source
+  module — all 30 (`src/` 24, `scripts/` 5, `app.py` 1); the 8 `__init__.py` package
+  markers are empty and carry no imports. Type hints on every public function.
+- `__all__` in modules with an explicit public surface (17 of the 24 non-`__init__.py`
   modules under `src/`; the rest export their whole surface).
 - Sections inside a module are separated by `# --- title ---` banners; private helpers
   are `_name`; constants are `SCREAMING_SNAKE` with a `#:` doc comment above them when
@@ -183,7 +240,7 @@ convention.
 
 **Data and typing**
 
-- Frozen dataclasses (`@dataclass(frozen=True)`) for contracts — 27 of them across
+- Frozen dataclasses (`@dataclass(frozen=True)`) for contracts — 32 of them across
   `src/`. `src/chains/state.py` holds `GraphState` as a `TypedDict(total=False)`; nodes
   read with `state.get(...)` and return **complete** values, not deltas.
 - No `Annotated[..., operator.add]` reducers anywhere, and `add_messages` is deliberately
@@ -238,6 +295,21 @@ convention.
   layer alone (the failure `docs/PLAN-REVIEW.md` already caught once).
 - Nothing outside `data/` is written at runtime.
 
+**Streamlit UI**
+
+- `streamlit` is imported only by `app.py` and the four `src/components/` modules. A new
+  UI file belongs under `src/components/` and imports `streamlit` itself; nothing else does.
+- Import every color, radius, font and shared class from `src/components/theme.py` — it is
+  the single token source. Never hard-code a token value, and never add a second stylesheet.
+- The rail width comes only from `st.set_page_config(initial_sidebar_state=260)` in
+  `app.py` — CSS cannot set it (Streamlit applies it as an inline style). `theme.py` owns
+  only the rail's surface, hairline and padding.
+- `chat.py` claims the `isip-answer` / `isip-question` container-key prefixes (the theme
+  styles them by prefix, and `app.py` reuses those two strings for its session-state
+  plumbing). Any other component must use a different `isip-…` prefix.
+- No business logic: a component renders what the pipeline already decided and reaches it
+  only through `src.chains.graph.invoke()` (see §1).
+
 **Tests**
 
 - Named for the behavior, not the function — real examples from the suite:
@@ -279,6 +351,9 @@ convention.
   unsupported question — refuse honestly and name what the documents cover.
 - Touch the network from `tests/`, import a script from `tests/`, or put business logic in
   `app.py` / `src/components/`.
+- Import `streamlit` outside `app.py` / `src/components/`, set the sidebar width from CSS
+  (it is Streamlit's inline style — use `initial_sidebar_state`), or add a JS/npm frontend
+  dependency — the UI is Streamlit-native (ADR-009).
 
 ---
 
@@ -286,8 +361,9 @@ convention.
 
 - `docs/SPEC.md` §9 freezes the interface contracts — change the spec first, then code.
 - `docs/PLAN.md` (T1–T26) and `docs/TODO.md` are the task record. Phases 1–3 are landed
-  (T2–T16 merged); T17's harness has landed and passes in mock mode; phases 4–6
-  (T18–T26) are not started.
+  (T2–T16 merged); T17's harness has landed and passes in mock mode; Phase 4's UI is landed
+  for T18 / T19 / T21 (PR #18 — `app.py` plus the four `src/components/` modules), but T20
+  (the debug panel) is **not** built; phases 5–6 (T22–T26) are not started.
 - Reference corpus: Microsoft FY2023 Annual Report, fiscal year ended June 30, 2023. The
   headline invariants pinned by golden QA and docs: FY2023 revenue **$211,915M**, FY2023
   operating income **$88,523M** vs FY2022 **$83,383M**. A FY2024 figure asserted as FY2023
