@@ -5,14 +5,14 @@ decided. It reads :class:`~src.chains.state.AnswerEnvelope` (and the same fields
 store's :class:`~src.store.sessions.Message` rows, which is how history survives a
 reload) and calls nothing — no retrieval, no prompt, no gateway, no
 :class:`~src.chains.graph` import. Every state the demo script exercises is present:
-the hero greeting for an empty session, the transcript for a populated one, a waiting
+the centered hero for an empty session, the transcript for a populated one, a waiting
 bubble while the answer is produced, citation cards under every cited answer, an
 explicit ungrounded marker when the verifier did not pass a claim through, and an
 error block with a retry action for a failed turn.
 
 Public surface
 --------------
-``render_empty_state``      hero greeting plus suggestion buttons (empty session)
+``render_empty_state``      centered hero: mark, title, subtext, demo-question chips
 ``render_transcript``       a session's full transcript, oldest turn first
 ``render_answer``           one live :class:`AnswerEnvelope`
 ``render_stored_answer``    one stored assistant answer
@@ -20,6 +20,7 @@ Public surface
 ``render_pending_answer``   the waiting bubble while the graph runs
 ``render_answer_error``     a failed turn, with an optional retry action
 ``render_composer``         the docked question box; returns the submitted text
+``render_footer_note``      the one muted status line under the canvas
 
 The canvas is theme-aware rather than theme-agnostic: it is built from Streamlit-native
 primitives (``st.chat_message``, ``st.chat_input``, ``st.expander``) and marks its own
@@ -42,6 +43,11 @@ import streamlit as st
 
 from src.components.theme import badge as theme_badge
 from src.components.theme import caption_note as theme_caption_note
+from src.components.theme import eyebrow as theme_eyebrow
+from src.components.theme import footer_note as theme_footer_note
+from src.components.theme import hero_mark as theme_hero_mark
+from src.components.theme import hero_sub as theme_hero_sub
+from src.components.theme import hero_title as theme_hero_title
 
 if TYPE_CHECKING:  # contract types only — no runtime import, so the module stays leaf-level
     from src.chains.state import AnswerEnvelope
@@ -53,6 +59,7 @@ __all__ = [
     "render_citation_card",
     "render_composer",
     "render_empty_state",
+    "render_footer_note",
     "render_pending_answer",
     "render_stored_answer",
     "render_transcript",
@@ -82,20 +89,51 @@ _CLASS_CHIP_ACCENT = "isip-chip-accent"
 _CLASS_FIGURE = "isip-figure"
 _CLASS_FIGURE_MUTED = "isip-figure-muted"
 
-#: The greeting shown on a session that has never been asked anything.
+#: The hero title shown on a session that has never been asked anything. The word
+#: :data:`HERO_ACCENT` inside it renders in the accent colour, the way a name does in
+#: the reference layout — that one tinted word is what makes the greeting read as ours.
 HERO_GREETING = "Ask your documents anything."
+
+#: The substring of :data:`HERO_GREETING` the hero tints. Must occur in it verbatim.
+HERO_ACCENT = "documents"
+
+#: The promise under the title: what an answer here is made of. Kept to one sentence so
+#: the hero stays two muted lines at any width rather than a paragraph.
+HERO_SUB = (
+    "Answers come only from the documents in this workspace, and every claim carries "
+    "its citation."
+)
+
+#: The eyebrow above the chip grid, in the reference layout's small uppercase register.
+HERO_EYEBROW = "TRY A DEMO"
 
 #: Shown on the hero when no document has been indexed yet — the honest empty state,
 #: so an empty canvas reads as "upload first" rather than as a broken page.
 HERO_NO_DOCS = "No document indexed yet — upload a PDF in the sidebar, then ask."
 
-#: The three questions the hero offers as starting points: one that returns a cited
-#: figure, one that fans out, one that is a follow-up. They mirror the demo script.
-SUGGESTED_QUESTIONS: tuple[str, ...] = (
-    "What was revenue in FY2023?",
-    "Compare operating income FY2023 vs FY2022.",
-    "Which segment drove that?",
+#: The six demo questions the hero offers, each paired with the Material Symbols icon
+#: its chip wears. Order matters: the grid fills three columns row by row, and the
+#: sequence walks the demo script — a cited figure, a period comparison, a
+#: best-segment pick, the two headline figures, the summary, then the trend. Every
+#: string is a golden-set question, so a chip click exercises a path we have evidence
+#: for instead of producing an answer nobody reviewed.
+_SUGGESTION_CHIPS: tuple[tuple[str, str], ...] = (
+    ("What was revenue in FY2023?", ":material/show_chart:"),
+    ("Compare operating income FY2023 vs FY2022", ":material/compare_arrows:"),
+    ("Which segment had the highest revenue?", ":material/donut_small:"),
+    ("What was net income and diluted EPS?", ":material/payments:"),
+    ("Summarize FY2023 key results", ":material/summarize:"),
+    ("What was the margin trend?", ":material/trending_up:"),
 )
+
+#: The chip labels alone, in grid order — the public reading of
+#: :data:`_SUGGESTION_CHIPS`, and the exact strings a chip click returns.
+SUGGESTED_QUESTIONS: tuple[str, ...] = tuple(question for question, _ in _SUGGESTION_CHIPS)
+
+#: The chip grid's width in columns. Three columns of two rows is the reference
+#: layout's shape; the loop reads the width from here so it can never draw a ragged
+#: row by disagreeing with itself about it.
+_SUGGESTION_COLUMNS = 3
 
 #: Placeholder in the docked composer.
 COMPOSER_PLACEHOLDER = "Ask a question about your documents…"
@@ -122,8 +160,8 @@ _UNGROUNDED_COPY = (
 #: Waiting bubble copy while the graph runs.
 PENDING_COPY = "Searching the documents, then checking the answer against them."
 
-#: Prefix for the hero suggestion buttons' widget keys, so the same suggestion on two
-#: sessions never collides.
+#: Prefix for the hero chips' widget keys, suffixed with the chip's index in
+#: :data:`_SUGGESTION_CHIPS`, so the same chip on two sessions never collides.
 _SUGGESTION_KEY = "isip-suggestion"
 
 #: Longest question the composer accepts; 4000 characters is a paste of several
@@ -148,36 +186,66 @@ class _AnswerView:
     citations: tuple[object, ...]
 
 
-def render_empty_state(
-    *,
-    suggestions: Sequence[str] = SUGGESTED_QUESTIONS,
-    doc_labels: Sequence[str] = (),
-) -> str | None:
-    """Render the hero greeting for a session with no turns; return a clicked suggestion.
+def render_empty_state(*, doc_labels: Sequence[str] | None = None) -> str | None:
+    """Render the centered hero for a session with no turns; return a clicked chip.
+
+    The hero is the canvas's only content before the first question, so it carries the
+    whole "start here" job: a centered mark, the greeting with one tinted word, the
+    muted promise, then the demo questions as a three-column chip grid. The mark,
+    title, subtext, eyebrow and footer live in :mod:`src.components.theme` — this
+    function composes them and owns only the chips, which are real Streamlit widgets.
 
     Args:
-        suggestions: Question prompts offered as buttons. Each is a real, labeled
-            Streamlit button — an unlabeled icon button is not an accessibility-safe
-            control (docs/CONSTRAINTS.md).
-        doc_labels: Display names of the indexed documents, when any exist. Passed so
-            the greeting can name what is searchable without this module reading the
-            catalog itself.
+        doc_labels: Display names of the indexed documents, or ``None``/empty when none
+            are. Passed so the subtext can name what is actually searchable without
+            this module reading the catalog itself.
 
     Returns:
-        The text of the clicked suggestion, or ``None`` when nothing was clicked. The
-        caller feeds the returned string into the composer's question path, so picking
-        a suggestion behaves exactly like typing it.
+        The label of the clicked chip, or ``None`` when none was clicked. The caller
+        feeds the returned string into the composer's question path, so picking a chip
+        behaves exactly like typing the question.
     """
 
-    st.markdown(f"### {HERO_GREETING}")
-    if doc_labels:
-        st.caption(f"Indexed: {', '.join(doc_labels)}")
-    else:
-        st.caption(HERO_NO_DOCS)
-    for index, suggestion in enumerate(suggestions):
-        if st.button(suggestion, key=f"{_SUGGESTION_KEY}-{index}"):
-            return suggestion
+    theme_hero_mark()
+    theme_hero_title(HERO_GREETING, accent=HERO_ACCENT)
+    theme_hero_sub(_hero_subtext(doc_labels))
+    theme_eyebrow(HERO_EYEBROW)
+    for row_start in range(0, len(_SUGGESTION_CHIPS), _SUGGESTION_COLUMNS):
+        columns = st.columns(_SUGGESTION_COLUMNS)
+        row = _SUGGESTION_CHIPS[row_start : row_start + _SUGGESTION_COLUMNS]
+        for offset, (question, icon) in enumerate(row):
+            with columns[offset]:
+                # A labeled button, never an icon-only one: the icon decorates the
+                # question, and the question is what a screen reader announces
+                # (docs/CONSTRAINTS.md).
+                if st.button(
+                    question,
+                    key=f"{_SUGGESTION_KEY}-{row_start + offset}",
+                    icon=icon,
+                    use_container_width=True,
+                ):
+                    return question
     return None
+
+
+def _hero_subtext(doc_labels: Sequence[str] | None) -> str:
+    """The hero's muted subtext: what is indexed here, then what an answer is made of."""
+
+    if doc_labels:
+        return f"Indexed and searchable: {', '.join(doc_labels)}. {HERO_SUB}"
+    return f"{HERO_NO_DOCS} {HERO_SUB}"
+
+
+def render_footer_note(text: str) -> None:
+    """Render the one muted status line under the canvas.
+
+    Args:
+        text: The line's text — what the pipeline is, how many documents are indexed,
+            and whether the run is on the offline mock model. Plain text, escaped by
+            the theme helper; it carries no markup.
+    """
+
+    theme_footer_note(text)
 
 
 def render_transcript(
