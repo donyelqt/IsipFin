@@ -61,6 +61,8 @@ __all__ = [
     "ClaimJudgement",
     "ClaimUnit",
     "Figure",
+    "asked_years",
+    "catalog_years",
     "extract_figures",
     "numeric_pre_pass",
     "rejected_units",
@@ -68,6 +70,7 @@ __all__ = [
     "split_units",
     "trim_answer",
     "undecided_units",
+    "year_coverage_gap",
 ]
 
 # --- the two outcome vocabularies (OBSERVABILITY.md: "figure_not_in_span | period_mismatch")
@@ -950,3 +953,78 @@ def undecided_units(judgements: Sequence[ClaimJudgement]) -> list[ClaimUnit]:
     """The claim units the pre-pass could not settle, in document order."""
 
     return [judgement.unit for judgement in judgements if judgement.outcome == OUTCOME_UNDECIDED]
+
+
+# --- the fiscal-year coverage gate ----------------------------------------------------
+
+
+#: How many fiscal years a single annual report's statements span. An annual report prints
+#: its reporting year alongside two years of comparatives, so a catalog naming one report
+#: year still stands for three. Mirrored from ``refuse``'s own ``_ANNUAL_COMPARATIVE_YEARS``
+#: (with the reaching range) rather than imported, because this module is the LLM-free
+#: symbolic layer and must not depend on a node: the number is a property of the *document
+#: format*, not of either consumer, and a third consumer would only duplicate it again.
+ANNUAL_COMPARATIVE_YEARS = 3
+
+
+def catalog_years(text: str) -> set[int]:
+    """Every fiscal year the catalog's own text shows, plus the years the newest one reaches.
+
+    The catalog is the ingest-time record of what is on disk — filenames and section paths —
+    and it is the *same* text ``refuse`` reads to write "the documents cover fiscal years
+    FY2021-FY2023". A single report year stands for the span an annual report's statements
+    carry (its own year plus two comparatives), which is why ``"2023_Annual_Report.pdf"``
+    reaches back to FY2021 rather than claiming coverage of exactly one year. Anything beyond
+    that is a guess, and a shorter set would refuse a year the corpus actually answers.
+    """
+
+    years = {int(match.group(0)) for match in _YEAR.finditer(text)}
+    if years:
+        latest = max(years)
+        years.update(range(latest - ANNUAL_COMPARATIVE_YEARS + 1, latest + 1))
+    return years
+
+
+def asked_years(question: str) -> set[int]:
+    """Every fiscal year the question names, in any of the corpus's printed four-digit forms.
+
+    ``FY2023``, ``fiscal year 2023`` and a bare ``2023`` all count. The digit lookarounds are
+    the same guards ``refuse`` and the pre-pass use, so a figure like ``211,915`` is never read
+    as a year, and the corpus's own conventions decide what a period looks like rather than a
+    new pattern this module invents.
+    """
+
+    return {int(match.group(0)) for match in _YEAR.finditer(question)}
+
+
+def year_coverage_gap(covered: set[int], question: str) -> bool:
+    """True when the question asks about a period the documents demonstrably do not cover.
+
+    The deterministic fiscal-year gate: :data:`_YEAR`-shaped labels read out of the question
+    are compared against the years the catalog shows. It is the same class of check the numeric
+    pre-pass already performs for figures — a symbolic predicate settled **before** any model
+    call — extended to the routing decision ADR-001 otherwise leaves entirely to the planner.
+
+    What it deliberately does *not* do:
+
+    * **It never moves a year the catalog covers.** A question naming no year at all
+      ("what was revenue?") has no gap, so the planner keeps its decision. The gate only ever
+      adds a refusal, and only for a question whose asked period lies outside the corpus.
+    * **It never evaluates a comparison.** A question naming several years is asking about
+      more than one of them, so a single-year gap would refuse a comparison the documents can
+      honestly answer. Those belong to the ``multi_part`` path, which is the planner's call
+      and stays the planner's.
+    * **It never fires on a period the catalog does not describe.** An empty or unreadable
+      catalog shows no years, so there is no coverage to compare against and no gap: the
+      planner's judgement stands, and ``refuse`` renders its own "cannot be determined" copy.
+    * **It never touches an entity- or topic-gap question.** Those are the other two refusal
+      classes ADR-001 names and stay the planner's, because the catalog carries no entity
+      list to compare a company name against symbolically.
+    """
+
+    if not covered:
+        return False
+    asked = asked_years(question)
+    if len(asked) != 1:
+        return False
+    return next(iter(asked)) not in covered
