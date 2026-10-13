@@ -9,7 +9,9 @@
 FROM python:3.11-slim AS builder
 
 # Every pin ships manylinux wheels, but a wheel-less platform falls back to a source build
-# (reportlab and faiss-cpu both have C extensions). The toolchain stays in this stage.
+# (faiss-cpu has a C extension). The toolchain stays in this stage — and nothing outside
+# requirements.txt is installed here, which is what keeps the dev packages (pytest, ruff,
+# black, mypy, pytest-cov, reportlab — see requirements-dev.txt) out of the image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -43,19 +45,24 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app \
     DATA_DIR=/app/data \
-    FASTEMBED_CACHE_PATH=/app/data/models \
-    LOG_JSON=1
+    FASTEMBED_CACHE_PATH=/app/data/models
 
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 
 # Only what the app reads. `docs/prompts/` is loaded at runtime by `load_prompt`, and the
-# upload path imports `scripts/build_index.py`; `tests/` ships so `docker compose exec app
-# pytest -q` and `scripts/eval_rag.py` (which reads tests/data/golden_qa.jsonl) work too.
-# `.env` and `data/` are deliberately absent: secrets never enter the image, and state
-# belongs in the volume.
+# upload path imports `scripts/build_index.py`; `tests/` ships so `scripts/eval_rag.py`
+# (which reads tests/data/golden_qa.jsonl) works, and so the documented in-container suite
+# run (`docker compose exec app sh -c "pip install -r requirements-dev.txt && pytest -q"`)
+# has something to run. The toolchain itself is NOT installed here — the runtime image
+# carries no dev packages (requirements.txt is the runtime pin-of-record; requirements-dev.txt
+# is dev-only, copied in only so the in-container run can `pip install -r requirements-dev.txt`
+# on demand, which is what keeps ~31 MiB of toolchain out of every image).
+# `.env` and `data/` are deliberately absent: secrets never enter the image,
+# and state belongs in the volume.
 COPY app.py pyproject.toml ./
+COPY requirements.txt requirements-dev.txt ./
 COPY .streamlit/ ./.streamlit/
 COPY src/ ./src/
 COPY scripts/ ./scripts/

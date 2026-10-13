@@ -1,0 +1,24 @@
+# The toolchain: test, lint, format and type gates, plus the generator that builds the
+# hermetic suite's in-memory PDF fixtures.
+#
+# None of these rows reach the runtime image. The Docker builder stage installs
+# requirements.txt only, so the image carries no toolchain it cannot use (the runtime stage
+# has no compiler, and nothing outside tests/ imports any of these). This file installs
+# requirements.txt first, which keeps every shared pin in exactly one place — no duplicated
+# version numbers to drift apart.
+#
+# Install with: pip install -r requirements-dev.txt
+#
+# `pytest -q` still works from a host venv created this way. The in-container run promised
+# by the README is installed on demand instead (see README §5), because shipping these
+# 31 MiB in every image to enable an occasional check was the defect.
+
+-r requirements.txt
+
+# --- dev (tools, not shipped) ---
+pytest==9.1.1
+pytest-cov==7.1.0
+reportlab==5.0.1    # test fixtures only: generates deterministic PDFs in-memory
+ruff==0.17.0
+black==26.10.1
+mypy==2.4.0          # scoped to src/utils + src/chains (docs/CONSTRAINTS.md)

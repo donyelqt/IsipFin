@@ -40,9 +40,14 @@ services:
       LOCAL_EMBEDDING_MODEL: ${LOCAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      # The index location, read in three places (src/core/retrieval.py, the upload path
+      # src/components/upload.py, and scripts/eval_rag.py) and documented in README §1 as a
+      # first-class knob — absent here, a host that exported it got it silently dropped,
+      # because `env_file` never propagates the shell environment into the container.
+      # Empty is the code default (`data/index`, i.e. /app/data/index on the volume).
+      INDEX_DIR: ${INDEX_DIR:-}
       MOCK_LLM: ${MOCK_LLM:-1}
       DATA_DIR: ${DATA_DIR:-/app/data}
-      LOG_JSON: ${LOG_JSON:-1}
     volumes:
       # Index artifacts, data/pdfs/*.pdf and chat.sqlite3 survive `down` and rebuilds.
       - data:/app/data

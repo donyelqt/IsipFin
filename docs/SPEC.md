@@ -155,9 +155,12 @@ first in `app.py::main()` and in `scripts/build_index.py::main()` /
   node's module owns `logger = logging.getLogger(__name__)` and logs degradations through it,
   tagging records with `extra={"node": NODE_NAME, ...}` so the emitted context (target: `ts`,
   `level`, `trace_id`, `session_id`, `node`) identifies the run. The JSON formatter /
-  `setup_logging` described in ADR-007 §1 is **not yet built** (Phase 4, with the UI) — until
+  `setup_logging` described in ADR-007 §1 is **not built** (Phase 4, with the UI) — until
   then the stdlib records are the observability output, alongside the per-node trace in
-  `NodeEvent` (see §9).
+  `NodeEvent` (see §9). `LOG_JSON` therefore names nothing: no module reads it
+  (`grep -rn LOG_JSON --include="*.py" .` returns no matches), so it was removed from
+  `Dockerfile` and `docker-compose.yml` and is documented as unbuilt here rather than
+  left as packaging that implies a JSON formatter exists.
 - Comments explain **why** (trade-offs, invariants, gotchas), never restate the code.
 - Errors: a **typed exception hierarchy, defined in the module that raises it** — the gateway
   taxonomy (`LLMError` plus `RateLimited` / `ContextLength` / `Auth` / `Timeout` /
