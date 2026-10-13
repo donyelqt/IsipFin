@@ -24,6 +24,15 @@ the gateway's typed errors are the one branch matched structurally, by the modul
 declares the class (:data:`_GATEWAY_MODULE`), instead of with an ``isinstance`` check: the
 import that would make the check possible is the import this module must not have.
 
+The same structural rule covers the graph's typed-error spine and the local embedder.
+``src.chains.graph`` imports langgraph and every node, and ``src.core.local_embedder``
+imports ``fastembed``; a component module importing either would drag the pipeline (or a
+heavy optional dependency) in at import time. Both families are therefore matched by the
+class's own ``__module__`` and ``__name__`` — :func:`_is_graph_error` on the spine's base
+class, so subclasses inherit one view instead of each getting a copy, and
+:func:`_is_local_embedder_error` by name. The contract types are named under
+``TYPE_CHECKING``, for annotations only.
+
 Public surface
 --------------
 ``ErrorView``       the frozen banner description (title, message, hint, retryable)
@@ -36,6 +45,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import streamlit as st
 
@@ -43,6 +53,10 @@ from src.components.theme import caption_note, label
 from src.core.pdf_parser import ParseError
 from src.core.retrieval import RetrievalError
 from src.store.db import SessionNotFoundError, StoreError
+
+if TYPE_CHECKING:  # contract types only — no runtime import, so the module stays leaf-level
+    from src.chains.graph import GraphError
+    from src.core.local_embedder import LocalEmbeddingError
 
 __all__ = [
     "ErrorView",
@@ -52,6 +66,13 @@ __all__ = [
 
 #: The gateway module, used as a match key only — it is deliberately **not** imported.
 _GATEWAY_MODULE = "src.utils.llm"
+
+#: The graph module and the base class of its typed-error spine, both used as match keys
+#: only. ``src.chains.graph`` imports langgraph and every node, so a component module that
+#: imported it would pull the whole pipeline in at import time (ADR-009's leaf rule); the
+#: family is therefore matched structurally, exactly like the gateway's errors below.
+_GRAPH_MODULE = "src.chains.graph"
+_GRAPH_BASE = "GraphError"
 
 #: The Retry action's widget key. Fixed, like the chat canvas's ``isip-chat-retry``: one
 #: error banner with an action is rendered per run, so a clash would mean the call site drew
@@ -168,6 +189,29 @@ _SESSION_MISSING_VIEW = ErrorView(
     retryable=False,
 )
 
+#: Every :class:`~src.chains.graph.GraphError`, matched through its base class so the whole
+#: family — ``GraphNodeError``, ``GraphStateError`` and any subclass a later task adds —
+#: lands on one view rather than three copies of it.
+_GRAPH_VIEW = ErrorView(
+    title="The answer could not be produced",
+    message=(
+        "Answering the question was refused at a step the pipeline controls, so no answer "
+        "was produced for this turn."
+    ),
+    hint=(
+        "Change the question — an empty or whitespace-only one, or a non-text input, is not "
+        "answerable — and ask again. The same failure will come back while the input is "
+        "unchanged, so retrying as-is will not help."
+    ),
+    retryable=False,
+)
+
+#: A :class:`~src.core.local_embedder.LocalEmbeddingError` that escaped outside
+#: ``src.core.retrieval``'s wrapper, so it was never rebound to a ``RetrievalError``. The
+#: same view as that wrapper's rebind: a dense leg that cannot embed leaves the index
+#: unusable, whether the embedder is this module's or the runtime one.
+_LOCAL_EMBEDDER_VIEW = _RETRIEVAL_VIEW
+
 #: The provider-mapped gateway errors ADR-007 names, keyed by class name. Every value is
 #: reached through :func:`_gateway_error_name`, never through an import.
 _GATEWAY_VIEWS: dict[str, ErrorView] = {
@@ -187,8 +231,15 @@ def classify_error(exc: BaseException) -> ErrorView:
 
     The branches are ADR-007's table in order: the store first (so its subclass wins),
     then retrieval, then the parser (whose view is built from the exception, to name the
-    page), then the gateway's typed errors, and finally the generic view — which is the
-    branch that keeps a failure nobody planned for from becoming a blank screen.
+    page), then the gateway's typed errors, then the graph's spine and the local embedder
+    (both matched structurally, see the module docstring), and finally the generic view —
+    which is the branch that keeps a failure nobody planned for from becoming a blank
+    screen.
+
+    A typed view never carries the exception's own text: its message and hint are fixed
+    strings, so a class name and a provider message reach the log and stop there. That is
+    the whole point of the branches — a view that leaked ``GraphStateError: question is
+    empty`` at the user would be telling them nothing they can act on.
 
     Args:
         exc: The exception that ended the turn or the upload.
@@ -214,6 +265,11 @@ def classify_error(exc: BaseException) -> ErrorView:
         gateway_view = _GATEWAY_VIEWS.get(name)
         if gateway_view is not None:
             return gateway_view
+
+    if _is_graph_error(exc):
+        return _GRAPH_VIEW
+    if _is_local_embedder_error(exc):
+        return _LOCAL_EMBEDDER_VIEW
 
     return _generic_view(exc)
 
@@ -303,6 +359,47 @@ def _gateway_error_name(exc: BaseException) -> str | None:
         if cls.__module__ == _GATEWAY_MODULE:
             return cls.__name__
     return None
+
+
+def _is_graph_error(exc: GraphError | BaseException) -> bool:
+    """Whether ``exc`` is one of the graph's typed errors (ADR-007's graph-side rows).
+
+    The graph module declares ``GraphError`` as the base of the whole spine —
+    ``GraphNodeError`` and ``GraphStateError`` both inherit from it, and any subclass a
+    later task adds will too — so one check on that base covers the family. The
+    module-plus-name test mirrors :func:`_gateway_error_name`: it reads the class's own
+    attributes and never imports ``src.chains.graph``, which is what keeps this module
+    leaf-level (ADR-009). The parameter is annotated with the base so the signature says
+    what the guard matches; ``BaseException`` stays in the union because the classifier
+    hands over whatever ended the turn, known or not.
+
+    Returns:
+        ``True`` for :class:`~src.chains.graph.GraphError` and its descendants.
+
+    """
+
+    for cls in type(exc).__mro__:
+        if cls.__name__ == _GRAPH_BASE and cls.__module__ == _GRAPH_MODULE:
+            return True
+    return False
+
+
+def _is_local_embedder_error(exc: LocalEmbeddingError | BaseException) -> bool:
+    """Whether ``exc`` is a :class:`~src.core.local_embedder.LocalEmbeddingError`.
+
+    Matched by class name rather than with ``isinstance`` for the reason the graph family
+    above is: the embedder module imports ``fastembed`` and ``os``, and this component
+    module must stay importable without either.
+
+    Returns:
+        ``True`` for a local-embedder failure, wherever in the pipeline it was raised.
+
+    """
+
+    for cls in type(exc).__mro__:
+        if cls.__name__ == "LocalEmbeddingError" and cls.__module__ == "src.core.local_embedder":
+            return True
+    return False
 
 
 def _page_number(exc: BaseException) -> int | None:
