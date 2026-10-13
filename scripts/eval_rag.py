@@ -44,8 +44,9 @@ Each unmeasurable cell reads ``NA`` with the reason beside it. The observed valu
 printed, labelled as an observation rather than a verdict, so a reader can tell "this mode
 cannot answer it" from "it failed".
 
-The **wrong-year canary** is the exception that proves the rule: it reads the answer
-markdown, so it is lexical, mode-independent, and fully able to FAIL under ``MOCK_LLM=1``.
+The **wrong-year canary** is the exception that proves the rule: it reads the answer's own
+figures and the layout they sit in — a sentence whole, a table cell against its column's
+header — so it is lexical, mode-independent, and fully able to FAIL under ``MOCK_LLM=1``.
 That is the point — the one regression that must never hide behind a mode.
 
 Exit codes, printed with their meaning on every run:
@@ -83,9 +84,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.utils.settings import load_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = REPO_ROOT / "tests" / "data" / "golden_qa.jsonl"
-DEFAULT_INDEX_DIR = REPO_ROOT / "data" / "index"
+#: ``INDEX_DIR`` in the environment overrides this, so the harness can be pointed at the mock
+#: index without rebuilding: the mock embedder is 64-dimensional and a real one 384, and a
+#: single directory cannot hold both.
+DEFAULT_INDEX_DIR = Path(os.environ.get("INDEX_DIR", "").strip() or (REPO_ROOT / "data" / "index"))
 CATALOG_NAME = "docs.jsonl"
 
 EXIT_PASS = 0
@@ -478,6 +484,15 @@ def _contains_figure(text: str, figure: str) -> bool:
     return figure in text or _compact(figure) in _compact(text)
 
 
+#: One markdown table row: a line that opens and closes with a pipe (``| a | b |``). A row
+#: is a structured record, not a sentence — its cells each belong to a column, and the
+#: column's header is what makes a figure attributable to a period.
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+#: A cell of the alignment row that separates a table's header from its body (``|---|``):
+#: only dashes, colons and spaces, never a label or a figure.
+_TABLE_CELL_ALIGNMENT = re.compile(r"^[\s:-]*$")
+
+
 def _sentences(text: str) -> list[str]:
     """The answer's sentences: markdown line breaks and sentence terminators both split."""
 
@@ -497,27 +512,121 @@ def _sentences(text: str) -> list[str]:
     return [chunk for chunk in (item.strip() for item in chunks) if chunk]
 
 
+def _row_cells(line: str) -> list[str]:
+    """One markdown table row as its stripped cells (``| a | b |`` -> ``["a", "b"]``)."""
+
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_label_cell(cell: str) -> bool:
+    """Whether a table cell labels rather than states a figure (``Revenue``, ``FY2023``)."""
+
+    return bool(cell) and not _FIGURE_IN_TEXT.search(cell)
+
+
+def _is_alignment_row(cells: Sequence[str]) -> bool:
+    """True for the ``|---|---|`` row that separates a table's header from its body."""
+
+    return all(cell and _TABLE_CELL_ALIGNMENT.fullmatch(cell) for cell in cells)
+
+
+def _assertions(answer_md: str) -> list[tuple[str, str]]:
+    """Every place the answer prints a figure, with the label the layout ties it to.
+
+    Prose is read exactly as it always was: a sentence is one place a figure can be
+    asserted, and the sentence itself is all the attribution there is.
+
+    A contiguous markdown table is read as a **structured record** instead. Its header row
+    names each column (``| Metric | FY2023 | FY2022 |``), so a figure in a body cell is
+    asserted for the period that cell's *own* column names — not for whatever the rest of
+    the row happens to print. The label returned with a figure is therefore the column
+    header above it plus the row's label cells, and never the row's other figures: three
+    year columns under three correct headers are three attributed figures, which is a
+    margin trend being right about every year rather than a year trap.
+
+    A row with no header above it has no column to attribute to — a single row that
+    travelled on its own, the way a pre-trim claim does — so it is read as the row text it
+    is, which is the only reading it can carry. The result is in document order, so the
+    first contaminated assertion is still the one a reader finds first.
+    """
+
+    units: list[tuple[str, str]] = []
+    rows: list[list[str]] = []
+
+    def flush_table() -> None:
+        if rows:
+            units.extend(_table_assertions(rows))
+            rows.clear()
+
+    for line in answer_md.replace("\r", "").split("\n"):
+        if _TABLE_ROW.match(line):
+            rows.append(_row_cells(line))
+            continue
+        flush_table()
+        units.extend((sentence, "") for sentence in _sentences(line))
+    flush_table()
+    return units
+
+
+def _table_assertions(rows: list[list[str]]) -> list[tuple[str, str]]:
+    """One table's figures, each attributed to its own column's header.
+
+    The header is the first row that labels something — the ``|---|---|`` alignment row and
+    any row of bare figures carry no label, so neither can name a column. Body rows are the
+    rest; the header row's own cells are read against the row's labels, as they are when
+    there is no header at all.
+    """
+
+    body = [cells for cells in rows if not _is_alignment_row(cells)]
+    header = body[0] if len(body) > 1 and any(_is_label_cell(cell) for cell in body[0]) else []
+
+    units: list[tuple[str, str]] = []
+    for row_index, cells in enumerate(body):
+        labels = " ".join(cell for cell in cells if _is_label_cell(cell))
+        for ordinal, cell in enumerate(cells):
+            if not _FIGURE_IN_TEXT.search(cell):
+                continue
+            column = header[ordinal] if header and row_index > 0 and ordinal < len(header) else ""
+            units.append((cell, " ".join(part for part in (labels, column) if part)))
+    return units
+
+
 def _presented_as_answer(answer_md: str, figure: str, year: str) -> bool:
     """Whether the answer asserts ``figure`` as the asked-for figure's value.
 
     The adjacent-year trap is a column problem: in the printed income statement the prior
     year's figure sits one cell to the left of the asked year's, so a year-blind read picks
-    the wrong number from the right row. The test is per sentence, over the sentences that
-    carry the figure, and a sentence clears only when it is explicitly comparative — either
-    by comparative language or by naming the figure's own year. "Revenue was $198,270
+    the wrong number from the right row. Each place the answer prints a figure is judged on
+    its own, and a place clears only when it is explicitly comparative — either by
+    comparative language or by naming the figure's own year. "Revenue was $198,270
     million" is the trap; "up from $198,270 million in FY2022" is the answer being right
     about both years.
+
+    Where the figure is printed decides what it can be judged against, so the place is what
+    carries the attribution:
+
+    * **a sentence** is judged whole — the sentence text is the only context its figures
+      have, exactly as before;
+    * **a table cell** is judged against the header of its own column plus its row's label
+      cells. A row's figures are separate assertions, so three year columns under three
+      correct headers are clean, while a figure that sits under a header naming another
+      year is asserted as that year's value — the trap, read structurally rather than
+      missed because the row also carries the asked year somewhere else in its width.
+
+    A table thus reads *more* strictly than prose rather than less: the asked year's figure
+    printed in another cell of the same row no longer vouchsafes its neighbour.
     """
 
     if not figure:
         return False
-    for sentence in _sentences(answer_md):
-        if not _contains_figure(sentence, figure):
+    for text, label in _assertions(answer_md):
+        if not _contains_figure(text, figure):
             continue
-        lowered = sentence.lower()
-        if year and year in sentence:
+        if year and year in text:
             continue
-        if any(marker in lowered for marker in _COMPARATIVE_MARKERS):
+        if year and year in label:
+            continue
+        if any(marker in text.lower() for marker in _COMPARATIVE_MARKERS):
             continue
         return True
     return False
@@ -1141,6 +1250,18 @@ def _verdicts(results: Sequence[CaseResult]) -> dict[str, str]:
     The canary's verdict runs over the cases it could actually *check*. A case whose answer
     carried no figure is not a pass and not a fail — it is unmeasured, so it is excluded
     from both the numerator and the denominator rather than inflating a pass rate.
+
+    A rate metric's bar is a **floor**: the rate must meet or exceed it, so ``PASS`` is
+    ``value >= bar`` and ``FAIL`` is ``value < bar``. (The earlier ``value > bar`` inverted
+    this — a 1.00 hit rate above a 0.9 floor printed FAIL, and a 0.71 miss rate below a
+    0.95 floor printed PASS, which is how a clean run ended "metrics missed their bar".)
+
+    The canary is the one metric whose bar is a **ceiling**: it reports a hard-fail *count*
+    of contaminated cases, so one occurrence is a regression on its own and its verdict
+    stays ``value > bar`` (bar 0 → any contamination fails, none passes).
+
+    ``NA`` is emitted in place of either verdict, never alongside one, so a metric this mode
+    could not measure can never be read as a failure by :func:`_exit_code`.
     """
 
     verdicts: dict[str, str] = {}
@@ -1157,18 +1278,26 @@ def _verdicts(results: Sequence[CaseResult]) -> dict[str, str]:
                 continue
             # The bar is zero: the canary is a hard-fail count, not a rate to trade off.
             value = float(sum(1 for r in checkable if r.wrong_year))
+            verdicts[name] = "FAIL" if value > bar else "PASS"
         else:
             scored = [v for v in (getattr(r, _FIELD[name]) for r in results) if v is not None]
             if not scored:
                 verdicts[name] = "NA"
                 continue
             value = sum(1 for item in scored if item) / len(scored)
-        verdicts[name] = "FAIL" if value > bar else "PASS"
+            verdicts[name] = "PASS" if value >= bar else "FAIL"
     return verdicts
 
 
 def _exit_code(results: Sequence[CaseResult], verdicts: Mapping[str, str]) -> tuple[int, str]:
-    """The run's exit code, and the reason printed beside it."""
+    """The run's exit code, and the reason printed beside it.
+
+    A metric this mode could not measure is ``NA`` — "no verdict", not "passed" and not
+    "failed". Only a literal ``FAIL`` contributes here, so an ``NA`` can never drive the
+    exit code: a reader who scored the same metric would see it unmeasured. The exit code
+    is read from these verdict strings rather than recomputed from the case values, so
+    this filter is the one place the ``NA``/``FAIL`` distinction has to hold.
+    """
 
     broken = [r for r in results if r.error_kind == "dataset"]
     if broken:
@@ -1364,6 +1493,10 @@ def _network_report(mock_mode: bool) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the golden set, print the report, return the process exit code."""
 
+    # `.env` is read before anything else, so MOCK_LLM and any key in it are part of the
+    # environment the mode is decided from. Without this the documented `cp .env.example
+    # .env` setup ran keyless and every case degraded.
+    load_env()
     args = parse_args(argv)
     # Read MOCK_LLM before anything imports the graph: the gateway and the embedder both
     # resolve from the environment, so an ambient value must not silently change what is

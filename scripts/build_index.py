@@ -21,8 +21,8 @@ the suite is hermetic, and ``testpaths = ["tests"]`` keeps it that way).
 Exit codes
 ----------
 0  success (every document either built or provably already indexed)
-1  failure: an unreadable PDF, an embedding error, or — in real embedding mode — a
-   missing ``OPENAI_API_KEY`` while ``MOCK_LLM`` is not ``1``
+1  failure: an unreadable PDF, an embedding error, a missing ``OPENAI_API_KEY`` while
+   ``EMBEDDING_PROVIDER=api``, or an ``EMBEDDING_PROVIDER`` value that names no backend
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from src.core.index import ChunkIndex, Embedder
 from src.core.pdf_parser import ParsedDocument, ParseError, parse_pdf
+from src.utils.settings import load_env
 
 if TYPE_CHECKING:
     # Annotation only. The runtime value lives in src.core.retrieval; importing it
@@ -70,6 +71,8 @@ class CatalogEntry(TypedDict):
 
 DOC_ID_CHARS = 12
 MOCK_ENV = "MOCK_LLM"
+EMBEDDING_PROVIDER_ENV = "EMBEDDING_PROVIDER"
+DEFAULT_EMBEDDING_PROVIDER = "local"
 API_KEY_ENV = "OPENAI_API_KEY"
 BASE_URL_ENV = "OPENAI_BASE_URL"
 EMBEDDING_BASE_URL_ENV = "EMBEDDING_BASE_URL"
@@ -194,10 +197,15 @@ class OpenAIEmbedder:
 def build_embedder() -> tuple[Embedder, str]:
     """Resolve the embedder from the environment and return it with a description.
 
-    ``MOCK_LLM=1`` selects the deterministic offline embedder. Otherwise a real
-    OpenAI-compatible client is built, and a missing key fails loudly here — before a
-    corpus is parsed and half an index is written — rather than producing an index with
-    no dense leg.
+    ``MOCK_LLM=1`` selects the deterministic offline embedder, and is checked *first* so
+    the keyless CI/reviewer path never consults a provider or a model at all. Otherwise
+    ``EMBEDDING_PROVIDER`` chooses the backend — ``local`` (the default) is an in-process
+    fastembed ONNX model needing no key, ``api`` is the OpenAI-compatible client. A key
+    missing for ``api``, or an unknown provider name, fails loudly here — before a corpus
+    is parsed and half an index is written — rather than producing an index with no dense
+    leg. Both ingest (``src/components/upload.py``) and query
+    (``src/core/retrieval.py``) resolve through this one function, so they cannot
+    disagree about which provider — or which width — an index was built with.
     """
     if os.environ.get(MOCK_ENV, "").strip() == "1":
         mock_embedder = MockEmbedder()
@@ -205,6 +213,43 @@ def build_embedder() -> tuple[Embedder, str]:
             f"mock embedder, deterministic, {mock_embedder.dimensions} dims, offline"
         )
 
+    provider = (
+        os.environ.get(EMBEDDING_PROVIDER_ENV, "").strip().lower() or DEFAULT_EMBEDDING_PROVIDER
+    )
+    if provider == "local":
+        return _build_local_embedder()
+    if provider == "api":
+        return _build_api_embedder()
+    raise BuildError(
+        f"{EMBEDDING_PROVIDER_ENV}={provider!r} is not a known embedding provider; use "
+        f"'local' (fastembed, the default, no key needed), 'api' (an OpenAI-compatible "
+        f"/embeddings endpoint), or {MOCK_ENV}=1 for the deterministic offline path."
+    )
+
+
+def _build_local_embedder() -> tuple[Embedder, str]:
+    """The in-process fastembed embedder (``EMBEDDING_PROVIDER=local``, the default).
+
+    The ML import and the model download are deferred to ``src.core.local_embedder``'s
+    first use, so resolving the policy here stays cheap and this script never pays for
+    ONNX when the mock path is taken. The local module's typed failure is re-raised as
+    this module's :class:`BuildError`, so every resolution failure — from any provider —
+    reaches the CLI as one message.
+    """
+    from src.core.local_embedder import LocalEmbeddingError, build_local_embedder
+
+    try:
+        return build_local_embedder()
+    except LocalEmbeddingError as exc:
+        raise BuildError(str(exc)) from exc
+
+
+def _build_api_embedder() -> tuple[Embedder, str]:
+    """The OpenAI-compatible embedder (``EMBEDDING_PROVIDER=api`` — today's behaviour).
+
+    A missing ``OPENAI_API_KEY`` fails here, before any corpus work, rather than
+    producing an index with no dense leg.
+    """
     api_key = os.environ.get(API_KEY_ENV, "").strip()
     if not api_key:
         raise BuildError(
@@ -378,10 +423,18 @@ def _load_existing(index_dir: Path, embedder: Embedder) -> HybridIndexHandle | N
     ``load_index`` is imported here, and ``HybridIndexHandle`` under ``TYPE_CHECKING``
     at module scope, so a build that never touches an existing index does not pay
     for the retrieval stack at runtime while the annotation still resolves.
-    """
-    from src.core.retrieval import load_index
 
-    return load_index(index_dir, embedder)
+    A ``RetrievalError`` — the width mismatch between the configured embedder and the
+    vectors already on disk is the one that matters — becomes this script's
+    :class:`BuildError`, so the CLI prints the actionable message and exits 1 instead of
+    letting a mismatch escape as a traceback.
+    """
+    from src.core.retrieval import RetrievalError, load_index
+
+    try:
+        return load_index(index_dir, embedder)
+    except RetrievalError as exc:
+        raise BuildError(str(exc)) from exc
 
 
 def index_one(
@@ -575,7 +628,9 @@ def build(
             # a freshly built one writes the sections of the bytes that were indexed.
             if report.doc_id not in entries:
                 entries[report.doc_id] = _entry_for(report, documents[report.doc_id])
-        write_catalog(list(entries.values()))
+        # Same path the catalog was read from: --index-dir must own the catalog too, or
+        # a build into a scratch directory rewrites the default index's catalog.
+        write_catalog(list(entries.values()), catalog_path(index_dir))
         print()
         print(f"catalog: {catalog_path(index_dir)} ({len(entries)} documents)")
         print(f"index:   {_index_size(index_dir)} in {index_dir}")
@@ -626,6 +681,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    load_env()
     args = parse_args(argv)
     index_dir = Path(args.index_dir)
     pdf_dir = Path(args.pdf_dir)

@@ -1,18 +1,18 @@
 """IsipFin — Streamlit entrypoint.
 
-The UI shell (ADR-009). This module wires the four component modules together and
-owns exactly three responsibilities, none of them business logic:
+The UI shell (ADR-009). This module wires the component modules together and owns
+exactly four responsibilities, none of them business logic:
 
 1. **Boundary** — nothing under ``src/components/`` (or this module) imports
    retrieval, prompt, or gateway internals. The pipeline is reached only through
    ``src.chains.graph.invoke()``, whose ``AnswerEnvelope`` is the single object
    that crosses into the UI.
-2. **Session state** — which session is active, and the transcript rendered for it.
-3. **Plumbing the sliders actually control** — the retrieval ``k`` slider is passed
-   to the retriever the same way an explicit argument would be, so a change shows
-   up in the next answer (GRADING-ALIGNMENT row 16). The node reads a module
-   constant, so this module sets it for the duration of the call rather than
-   changing the frozen graph signature.
+2. **Environment** — ``settings.load_env()`` runs first, because the docs tell a
+   reader to ``cp .env.example .env`` and nothing used to read that file.
+3. **View routing** — the rail's nav writes ``st.session_state["isip-view"]`` and
+   the canvas renders the matching surface. This is the information architecture
+   the rail used to lack: previously every control lived in the rail at once.
+4. **Turn lifecycle** — session state, the graph call, and persistence.
 
 Run: ``streamlit run app.py`` (see docs/RUNBOOK.md).
 """
@@ -20,32 +20,53 @@ Run: ``streamlit run app.py`` (see docs/RUNBOOK.md).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import streamlit as st
 from src.chains.graph import invoke
 from src.chains.state import AnswerEnvelope, DocSummary, Turn
-from src.components import chat, sidebar, theme, upload
-from src.store.sessions import SessionStore
+from src.components import chat, errors, sidebar, theme, upload
+from src.components.debug_panel import render_debug_panel
+from src.store.sessions import Message, SessionStore
+from src.utils.settings import load_env
 
 logger = logging.getLogger(__name__)
 
-#: Session-state keys this module owns. Components own theirs under the same prefix.
+#: Session-state keys this module owns.
 _QUESTION_KEY = "isip-question"
 _ANSWER_KEY = "isip-answer"
-_ERROR_KEY = "isip-error"
+_LAST_KEY = "isip-last-answer"
+_LAST_SESSION_KEY = "isip-last-answer-session"
+_VIEW_KEY = "isip-view"
+
+#: The Diagnostics picker's widget key: the answer whose panel is drawn. A widget key
+#: rather than a state key — the selection belongs to the run that made it, and nothing
+#: else reads it.
+_ANSWER_PICKER_KEY = "isip-diagnostics-answer"
+_ANSWER_PICKER_LABEL = "Answer to inspect"
+
+#: The picker's row for the live envelope, offered first when there is one: the live
+#: answer is the only shape carrying the query plan and the retrieval scores.
+_LIVE_OPTION_LABEL = "Current answer (live)"
+
+#: Longest question a picker row renders before it is cut, ellipsis included.
+_ANSWER_LABEL_CHARS = 72
+
+_RAIL_WIDTH = 260  # the docs confirm an int means "auto behaviour at this width" (200-600)
 
 
 def _open_store() -> SessionStore | None:
     """Open the chat store, or return ``None`` when it cannot be opened.
 
-    A missing or unreadable database is a degraded UI (the session rail says so),
-    never a crash: questions can still be asked and answered without persistence.
+    A missing or unreadable database is a degraded UI (the rail's status card says
+    so), never a crash: questions can still be asked and answered without
+    persistence.
     """
     if "isip-store" not in st.session_state:
         try:
             st.session_state["isip-store"] = SessionStore()
-        except Exception as exc:  # sqlite errors surface as several concrete types
+        except Exception as exc:  # sqlite failures surface as several concrete types
             logger.warning("chat store unavailable: %s", exc)
             st.session_state["isip-store"] = None
     store: SessionStore | None = st.session_state["isip-store"]
@@ -86,23 +107,6 @@ def _history(store: SessionStore | None, session_id: str | None) -> list[Turn]:
         return []
 
 
-def _ask(question: str, *, params: Any, history: list[Turn], k: int) -> AnswerEnvelope:
-    """Run one question through the graph and return its envelope."""
-    from src.chains.nodes import retrieve as retrieve_node
-
-    previous = retrieve_node.RETRIEVE_K
-    retrieve_node.RETRIEVE_K = max(1, int(k))
-    try:
-        return invoke(
-            question,
-            history=history,
-            params=params,
-            doc_catalog=_doc_catalog(),
-        )
-    finally:
-        retrieve_node.RETRIEVE_K = previous
-
-
 def _trace_payload(envelope: AnswerEnvelope) -> list[dict[str, Any]]:
     """The node trace as plain dicts, because the store JSON-encodes it verbatim.
 
@@ -123,6 +127,23 @@ def _trace_payload(envelope: AnswerEnvelope) -> list[dict[str, Any]]:
     ]
 
 
+def _ask(question: str, *, params: Any, history: list[Turn], k: int) -> AnswerEnvelope:
+    """Run one question through the graph and return its envelope.
+
+    ``src.chains.nodes.retrieve`` reads a module constant rather than a parameter,
+    so the rail's k slider is applied here for the duration of one call and
+    restored in ``finally`` — the frozen graph signature is not forked for it.
+    """
+    from src.chains.nodes import retrieve as retrieve_node
+
+    previous = retrieve_node.RETRIEVE_K
+    retrieve_node.RETRIEVE_K = max(1, int(k))
+    try:
+        return invoke(question, history=history, params=params, doc_catalog=_doc_catalog())
+    finally:
+        retrieve_node.RETRIEVE_K = previous
+
+
 def _record(
     store: SessionStore | None,
     session_id: str | None,
@@ -133,10 +154,7 @@ def _record(
     if store is None or not session_id:
         return
     try:
-        store.append_turns(
-            session_id,
-            [{"role": "user", "content": question}],
-        )
+        store.append_turns(session_id, [{"role": "user", "content": question}])
         store.record_message(
             session_id,
             question,
@@ -159,88 +177,242 @@ def _record(
         logger.warning("persisting turn failed: %s", exc)
 
 
-def main() -> None:
-    """Render the shell: theme, rail, canvas, composer, and one question's turn."""
-    st.set_page_config(
-        page_title="IsipFin",
-        page_icon="IPF",
-        layout="wide",
-        # The rail width. Streamlit applies this as an inline style, so no CSS rule
-        # can set it (see src/components/theme.py); 260 sits inside its 200-600 range.
-        initial_sidebar_state=260,
+def _footer_text(rail_ready: bool, docs: int) -> str:
+    """One honest status line: what the pipeline is, and whether it is offline."""
+    parts = ["Hybrid RAG · FAISS + BM25 + RRF", "deterministic numeric pre-pass"]
+    parts.append(
+        f"{docs} document{'' if docs == 1 else 's'} indexed"
+        if rail_ready
+        else "no index yet — add a PDF under Documents"
     )
-    theme.inject_theme()
+    if os.environ.get("MOCK_LLM", "").strip() == "1":
+        parts.append("offline mock mode")
+    return " · ".join(parts)
 
-    store = _open_store()
 
-    rail = sidebar.render_sidebar(
-        store,
-        upload_panel=upload.render_upload_panel,
-    )
+def _live_answer(session_id: str | None) -> AnswerEnvelope | None:
+    """The live answer *for this conversation*, or ``None`` when there is none.
 
-    st.session_state.setdefault(_QUESTION_KEY, "")
-    st.session_state.setdefault(_ANSWER_KEY, None)
-    st.session_state.setdefault(_ERROR_KEY, "")
+    ``_LAST_KEY`` is written when an answer is produced and is not cleared when the
+    rail switches conversations, so it counts as this conversation's answer only when
+    the session recorded beside it in :data:`_LAST_SESSION_KEY` is the active one.
+    Returning it for any other session would put one conversation's live panel under
+    another's name — the silently-wrong surface the panel exists to rule out.
+    """
 
+    if st.session_state.get(_LAST_SESSION_KEY) != session_id:
+        return None
+    last: AnswerEnvelope | None = st.session_state.get(_LAST_KEY)
+    return last
+
+
+def _stored_answers(store: SessionStore | None, session_id: str | None) -> list[Message]:
+    """The active conversation's stored answers, newest first, or ``[]``.
+
+    Newest first because the picker leads with the most recent answer; the store
+    returns them oldest first, so the order is turned around here rather than at the
+    widget. A store that cannot be read yields ``[]`` — the view then shows its
+    "ask a question first" placeholder, the honest reading of "no answers to inspect"
+    — and the failure is logged, never raised into the render.
+    """
+
+    if store is None or not session_id:
+        return []
+    try:
+        return list(reversed(store.list_messages(session_id)))
+    except Exception as exc:  # sqlite failures surface as several concrete types
+        logger.warning("stored answers read failed for %s: %s", session_id, exc)
+        return []
+
+
+def _answer_option_label(message: Message) -> str:
+    """One picker row: a stored answer's question, whitespace-collapsed and shortened."""
+
+    question = " ".join(str(message.question or "").split())
+    if not question:
+        return f"Answer {message.id}"
+    if len(question) > _ANSWER_LABEL_CHARS:
+        return question[: _ANSWER_LABEL_CHARS - 1].rstrip() + "…"
+    return question
+
+
+def _render_chat_view(rail: Any, store: SessionStore | None) -> None:
+    """The conversation surface: stored transcript, the live answer, the composer."""
     session_id: str | None = rail.session_id
-    history = _history(store, session_id)
     doc_labels = rail.doc_labels
 
-    # --- the canvas: stored transcript, then the live answer for this turn ------
+    # Whether the conversation already holds anything. The hero is an *empty state*, so it
+    # may only render when this is false — otherwise it reappears underneath the transcript
+    # after every answer, which is what it did before this flag existed.
+    has_content = False
+
     if store is not None and session_id:
         try:
-            turns = list(store._turns(session_id))
-            messages = list(store._messages_for(session_id))
-            chat.render_transcript(turns, messages, doc_names=doc_labels)
+            # The public reader, not the store's private turn accessors: get_history
+            # returns turns and messages together and documents that messages are loaded
+            # whole so a citation block is never sliced away from its answer.
+            history = store.get_history(session_id)
+            if history.turns:
+                has_content = True
+                chat.render_transcript(history.turns, history.messages, doc_names=doc_labels)
         except Exception as exc:
             logger.warning("transcript read failed: %s", exc)
-            chat.render_answer_error(
-                "The saved conversation could not be loaded.",
-                details=str(exc),
-            )
+            errors.render_error(exc)
 
-    # --- the live answer from THIS turn, rendered before the composer ----------
     answer: AnswerEnvelope | None = st.session_state[_ANSWER_KEY]
     if answer is not None:
+        has_content = True
         chat.render_answer(answer, doc_names=doc_labels)
         st.session_state[_ANSWER_KEY] = None
 
-    # --- the composer: where the next question comes from ---------------------
     pending: str | None = chat.render_composer(disabled=not rail.index_ready)
     question = pending or st.session_state[_QUESTION_KEY]
 
     if not question:
+        if has_content:
+            chat.render_footer_note(_footer_text(rail.index_ready, rail.doc_count))
+            return
         # The empty state returns the suggestion the user clicked; discarding that
         # value was the bug that made a suggestion click do nothing at all.
-        suggestion = chat.render_empty_state(
-            doc_labels=list(doc_labels.values()) or None,
-        )
+        suggestion = chat.render_empty_state(doc_labels=list(doc_labels.values()) or None)
         if not suggestion:
+            chat.render_footer_note(_footer_text(rail.index_ready, rail.doc_count))
             return
         question = suggestion
 
     k = int(st.session_state.get("isip-param-k", 8))
     chat.render_pending_answer()
     try:
-        envelope = _ask(question, params=rail.params, history=history, k=k)
+        envelope = _ask(question, params=rail.params, history=_history(store, session_id), k=k)
     except Exception as exc:
         logger.warning("question failed: %s", exc, exc_info=True)
-        chat.render_answer_error(
-            "The answer could not be produced.",
-            details=f"{type(exc).__name__}: {exc}",
-            retry=True,
-        )
+        # ADR-007's taxonomy, not a catch-all: the classifier names the failure class
+        # (missing key, rate limit, over-long context, …) and its own Retry verdict, so
+        # a missing key is a banner with the env var to set, not one that offers a
+        # retry that cannot help.
+        view = errors.classify_error(exc)
+        errors.render_error(exc, on_retry=view.retryable)
         return
 
     # Persist first, then rerun. With a store the transcript renders the turn from
     # the database, so holding the envelope too would draw it twice; without a
     # store there is nothing to re-read, so the envelope carries it for one rerun.
     st.session_state[_QUESTION_KEY] = ""
+    st.session_state[_LAST_KEY] = envelope
+    st.session_state[_LAST_SESSION_KEY] = session_id
     if store is not None and session_id:
         _record(store, session_id, question, envelope)
     else:
         st.session_state[_ANSWER_KEY] = envelope
     st.rerun()
+
+
+def _render_view(rail: Any, store: SessionStore | None) -> None:
+    """Dispatch the canvas to the surface the rail's nav selected."""
+    view = getattr(rail, "view", "chat")
+
+    if view == "documents":
+        upload.render_upload_panel(store=store)
+        upload.render_document_catalog()
+        return
+
+    if view == "retrieval":
+        upload.render_index_status(upload.index_status())
+        st.caption(
+            "Retrieval is hybrid: dense FAISS vectors and sparse BM25 keyword ranks, "
+            "fused with Reciprocal Rank Fusion over child chunks, then expanded to the "
+            "parent passage that carries the full table or section. Per-answer scores "
+            "are on Diagnostics."
+        )
+        return
+
+    if view == "parameters":
+        st.subheader("Model parameters")
+        sidebar.render_model_params()
+        st.caption(
+            "These values travel with every question. Temperature and top-p apply to "
+            "sampling; retrieval k sets how many fused children are considered per query."
+        )
+        return
+
+    if view == "diagnostics":
+        _render_diagnostics_view(rail, store)
+        return
+
+    _render_chat_view(rail, store)
+
+
+def _render_diagnostics_view(rail: Any, store: SessionStore | None) -> None:
+    """The Diagnostics surface: the plan, path, retrieval and grounding of an answer.
+
+    ``docs/OBSERVABILITY.md``'s contract is that the panel renders *the selected*
+    answer — "for any message the user selects, not just the latest". The live answer
+    is the current one, offered first because it is the only shape carrying the query
+    plan and the retrieval scores; the active conversation's stored answers are the
+    historical ones, each rendering the ``node_trace`` read back from the store, with
+    the sections a stored row cannot fill saying so instead of drawing an empty block.
+    """
+
+    st.subheader("Diagnostics")
+    live = _live_answer(rail.session_id)
+    stored = _stored_answers(store, rail.session_id)
+
+    # The live marker is the ``None`` key and a stored answer's key is its row id —
+    # both hashable, unlike a ``Message``, whose ``node_trace`` is a list. Keying by id
+    # also keeps the picker's selection fixed to one answer as the list grows.
+    answers_by_id: dict[int, Message] = {message.id: message for message in stored}
+    labels: dict[int | None, str] = {}
+    if live is not None:
+        labels[None] = _LIVE_OPTION_LABEL
+    for message in stored:
+        labels[message.id] = _answer_option_label(message)
+
+    options = list(labels)
+    if not options:
+        st.caption(
+            "Ask a question first — the debug panel renders the plan, the node "
+            "path with per-node latency and tokens, and the retrieval scores for "
+            "that answer."
+        )
+        return
+
+    # A lone answer needs no control: the picker appears only when there is a choice.
+    choice: int | None = options[0]
+    if len(options) > 1:
+        choice = st.selectbox(
+            _ANSWER_PICKER_LABEL,
+            options,
+            format_func=labels.__getitem__,
+            key=_ANSWER_PICKER_KEY,
+        )
+    if choice is None:
+        render_debug_panel(envelope=live, doc_names=rail.doc_labels)
+    else:
+        render_debug_panel(message=answers_by_id[choice], doc_names=rail.doc_labels)
+
+
+def main() -> None:
+    """Render the shell: environment, theme, rail, and the selected canvas view."""
+    st.set_page_config(
+        page_title="IsipFin",
+        page_icon=":material/finance:",
+        layout="wide",
+        # The rail width. Streamlit applies this as an inline style, so no CSS rule
+        # can set it (see src/components/theme.py); 260 sits inside its 200-600 range.
+        initial_sidebar_state=_RAIL_WIDTH,
+    )
+    # The docs tell a reader to `cp .env.example .env`; this is what reads it.
+    load_env()
+    theme.inject_theme()
+
+    store = _open_store()
+    rail = sidebar.render_sidebar(store)
+
+    st.session_state.setdefault(_QUESTION_KEY, "")
+    st.session_state.setdefault(_ANSWER_KEY, None)
+    st.session_state.setdefault(_VIEW_KEY, "chat")
+
+    _render_view(rail, store)
 
 
 if __name__ == "__main__":
