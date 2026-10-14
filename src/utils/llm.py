@@ -34,12 +34,17 @@ silently ignored and the ambient one is sent instead — which is the failure
 **Retry policy (ADR-005).** HTTP 429 and HTTP 5xx are retried with capped exponential
 backoff plus jitter — ``min(1s * 2**(attempt-1), 30s)`` with half-fixed/half-random
 jitter — for at most ``MAX_ATTEMPTS = 3`` attempts (one call plus two retries); a third
-consecutive 429 raises :class:`LLMError.RateLimited`. Auth (401/403), context-length and
-timeout failures are **not** retried: a second identical attempt cannot succeed, so they
-surface immediately as their own typed errors, and each node's failure table in ADR-005
-decides what happens next. The SDK's transport-level retries are disabled
-(``max_retries=0``) so this policy is the only retry authority — otherwise a 429 would be
-attempted six times before the node ever saw it. Sleeps and jitter are injectable
+consecutive 429 raises :class:`LLMError.RateLimited`. When a 429 instead names how long
+to wait — a ``Retry-After`` response header, or the seconds written into the body the way
+Groq states a tokens-per-minute window — that hint is used verbatim rather than the
+computed backoff, capped by :data:`RETRY_AFTER_CAP_S`: the rolling window the provider
+measured is what clears, so a retry on our own 1s/2s schedule lands back inside it. Every
+other retryable failure keeps the jittered backoff unchanged. Auth (401/403),
+context-length and timeout failures are **not** retried: a second identical attempt
+cannot succeed, so they surface immediately as their own typed errors, and each node's
+failure table in ADR-005 decides what happens next. The SDK's transport-level retries are
+disabled (``max_retries=0``) so this policy is the only retry authority — otherwise a 429
+would be attempted six times before the node ever saw it. Sleeps and jitter are injectable
 (constructor arguments, with module-level defaults that monkeypatching can replace), so a
 retry test never spends three real seconds.
 
@@ -81,6 +86,7 @@ __all__ = [
     "PROVIDER_DEFAULTS",
     "REDACTED_KEY",
     "REQUEST_TIMEOUT_S",
+    "RETRY_AFTER_CAP_S",
     "Auth",
     "ChatClient",
     "ChatLLM",
@@ -98,6 +104,7 @@ __all__ = [
     "default_sleep",
     "resolved_config",
     "resolved_provider",
+    "retry_after_seconds",
     "validate_json_schema",
 ]
 
@@ -183,6 +190,15 @@ MAX_ATTEMPTS = 3
 BACKOFF_BASE_S = 1.0
 #: Ceiling for the exponential growth, so a long outage cannot stall a turn for minutes.
 BACKOFF_CAP_S = 30.0
+#: Ceiling for a provider's own retry hint on a 429, and the reason it is not unbounded:
+#: a hint is a scheduling promise, not a licence to hold a turn. It matches
+#: :data:`BACKOFF_CAP_S` because the gateway's whole latency promise is already "one chat
+#: call plus bounded waits" — a hundred-second hint would outlast the turn the user is
+#: waiting on. TPM/RPM windows are short and *rolling*, so half a minute of waiting has
+#: already moved the request into a fresh window most of the time, and the attempt budget
+#: (two retries) keeps the worst case at ``2 * 30s = 60s`` of waiting, comfortably inside
+#: :data:`REQUEST_TIMEOUT_S`.
+RETRY_AFTER_CAP_S = 30.0
 #: Per-request timeout handed to the OpenAI client (the gateway owns one client per call).
 REQUEST_TIMEOUT_S = 120.0
 
@@ -608,6 +624,88 @@ def default_jitter(delay: float) -> float:
     return delay / 2.0 + random.random() * (delay / 2.0)
 
 
+# --- the provider's own retry hint -------------------------------------------------
+#
+# A 429 that names how long to wait is not a generic failure: Groq's answers an exact
+# window ("Please try again in 4.0955s" for a tokens-per-minute limit, in seconds with a
+# fraction; OpenAI/Azure use `Retry-After: 3`), and the rolling window it names is what
+# actually unblocks the request. Retrying on our own 1s/2s schedule instead means the
+# retry lands inside the very window the provider just measured, which is how one 429
+# becomes three consecutive ones and a degraded turn.
+#
+# Two sources, checked in this order — a header is the standard, the body is what this
+# project actually observes:
+#   1. the HTTP response the raised exception carries (``response.headers``, or an
+#      httpx-style ``response`` on SDK exceptions);
+#   2. the seconds written into the message body (Groq's ``... try again in 4.0955s``).
+# Anything unparseable, zero or negative is *no hint at all* and leaves the exponential
+# backoff untouched.
+
+
+def _retry_after_header(exc: BaseException) -> float | None:
+    """The seconds a ``Retry-After`` response header on ``exc`` names, if any.
+
+    The SDK's rate-limit errors carry the ``httpx.Response`` they came from, so the header
+    is read off that first; a stub raising anything else simply has no response and falls
+    through to the message body. It may also be an HTTP-date rather than a delay, which is
+    not a duration and is deliberately ignored — parsing one would need a clock.
+    """
+    candidates = (exc, getattr(exc, "response", None))
+    for holder in candidates:
+        if holder is None:
+            continue
+        headers = getattr(holder, "headers", None)
+        if not isinstance(headers, dict):
+            continue
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if isinstance(raw, str):
+            return _retry_after_seconds(raw)
+    return None
+
+
+def _retry_after_message(exc: BaseException) -> float | None:
+    """The seconds ``exc``'s message names, as Groq writes it: ``try again in 4.0955s``.
+
+    The pattern is anchored on "in" plus a number plus an "s" so it also matches the
+    minutes form some providers use (``try again in 2m``) — converted, not ignored, since
+    the number and the unit are both there.
+    """
+    match = re.search(
+        r"try again in\s+(\d+(?:\.\d+)?)\s*(ms|s|m|h)?", str(exc), flags=re.IGNORECASE
+    )
+    if match is None:
+        return None
+    return _retry_after_seconds(match.group(1), match.group(2))
+
+
+def _retry_after_seconds(raw: str, unit: str | None = None) -> float | None:
+    """``raw`` as a positive number of seconds, or ``None`` when it is not one.
+
+    A unitless value is seconds (that is what both the HTTP header and Groq mean); a named
+    unit is converted. Anything that is not a plain positive number — a date, a mangled
+    string — yields ``None`` so the caller keeps the backoff it can reason about.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0.0:  # NaN, zero and negatives are not a wait
+        return None
+    multiplier = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}.get((unit or "s").lower(), 1.0)
+    return value * multiplier
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """How long the provider asked us to wait before retrying, in seconds, or ``None``.
+
+    Header first, then the message body: a header is the interoperable form, and Groq's
+    body hint is the one this project observes on a tokens-per-minute limit. The value is
+    returned as the provider stated it; clamping to :data:`RETRY_AFTER_CAP_S` is the
+    caller's policy decision, not a parsing one.
+    """
+    return _retry_after_header(exc) or _retry_after_message(exc)
+
+
 class ChatLLM:
     """One OpenAI-compatible chat client with the gateway's retries and accounting.
 
@@ -620,7 +718,9 @@ class ChatLLM:
 
     Retries (429/5xx, ``max_attempts = 3``) and the schema-retry are both bounded; the
     class holds no state beyond its configuration, so one client per ``build_llm`` call is
-    safe to share and trivially reproducible.
+    safe to share and trivially reproducible. A 429 that names its own wait (a
+    ``Retry-After`` header, or Groq's body hint) sleeps that long instead of the backoff,
+    up to ``retry_after_cap_s``.
     """
 
     def __init__(
@@ -631,6 +731,7 @@ class ChatLLM:
         max_attempts: int = MAX_ATTEMPTS,
         backoff_base_s: float = BACKOFF_BASE_S,
         backoff_cap_s: float = BACKOFF_CAP_S,
+        retry_after_cap_s: float = RETRY_AFTER_CAP_S,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         jitter: Callable[[float], float] | None = None,
     ) -> None:
@@ -641,6 +742,7 @@ class ChatLLM:
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._backoff_cap_s = backoff_cap_s
+        self._retry_after_cap_s = retry_after_cap_s
         self._sleep = sleep
         self._jitter = jitter
 
@@ -733,6 +835,23 @@ class ChatLLM:
         """The injected sleeper, else the module-level default resolved per call."""
         return self._sleep if self._sleep is not None else default_sleep
 
+    def _retry_delay(
+        self, attempt: int, exc: BaseException, error: LLMError, jitter: Callable[[float], float]
+    ) -> float:
+        """The wait before ``attempt``'s retry: the provider's 429 hint, else the backoff.
+
+        A 429 that says how long to wait gets exactly that (capped), because the rolling
+        window it names is the thing that actually clears. Everything else — 5xx, and 429s
+        with no parseable hint — keeps the jittered exponential schedule unchanged, which
+        is the whole point of having two policies: the backoff stays the default, and the
+        hint only overrides it when the provider was specific.
+        """
+        if isinstance(error, RateLimited):
+            hint = retry_after_seconds(exc)
+            if hint is not None:
+                return min(hint, self._retry_after_cap_s)
+        return jitter(backoff_delay(attempt, self._backoff_base_s, self._backoff_cap_s))
+
     def _resolve_jitter(self) -> Callable[[float], float]:
         """The injected jitter function, else the module-level default resolved per call."""
         return self._jitter if self._jitter is not None else default_jitter
@@ -751,9 +870,7 @@ class ChatLLM:
                 error.attempts = attempts
                 if not _is_retryable(error) or attempts >= self._max_attempts:
                     raise error from exc
-                await sleeper(
-                    jitter(backoff_delay(attempts, self._backoff_base_s, self._backoff_cap_s))
-                )
+                await sleeper(self._retry_delay(attempts, exc, error, jitter))
 
     def _to_result(self, completion: Any) -> ChatResult:
         """The provider payload reduced to the frozen :class:`ChatResult` fields."""

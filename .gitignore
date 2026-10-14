@@ -7,6 +7,9 @@
 
 # Runtime state — never commit (mounted as a compose volume)
 data/
+# Scratch output from real-API eval runs: logs kept locally for the report, never
+# committed (they can contain provider response bodies).
+.evalwork/
 # Test fixtures under tests/data/ ARE committed: the golden-QA dataset the eval
 # harness reads. Without this negation the `data/` rule above swallows it and a
 # fresh clone cannot run scripts/eval_rag.py at all.
