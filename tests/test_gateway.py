@@ -38,7 +38,6 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -197,12 +196,33 @@ def mock_client() -> Any:
 # --- the stub transport (the seam ChatLLM documents) ------------------------------
 
 
-class ProviderStatusError(Exception):
-    """A provider failure carrying only the status code the gateway reads."""
+class _ProviderResponse:
+    """The response object a provider error carries, as ``httpx.Response`` does."""
 
-    def __init__(self, status: int, detail: str = "the provider refused the request") -> None:
+    def __init__(self, headers: dict[str, str] | None = None) -> None:
+        self.headers = headers
+
+
+class ProviderStatusError(Exception):
+    """A provider failure carrying the status code and response the gateway reads.
+
+    ``headers`` and ``response`` mirror what the real SDK's errors set — ``Retry-After``
+    lives in the response's headers — so a retry-hint test drives the same attributes a
+    live 429 would carry instead of bolting them on afterwards.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        detail: str = "the provider refused the request",
+        *,
+        headers: dict[str, str] | None = None,
+        response: _ProviderResponse | None = None,
+    ) -> None:
         super().__init__(f"{detail} (HTTP {status})")
         self.status_code = status
+        self.headers = headers
+        self.response = response
 
 
 @dataclass
@@ -527,8 +547,7 @@ def test_a_rate_limit_that_recovers_answers_without_raising(
 
 def test_a_retry_after_header_is_waited_out_verbatim(mock_mode: None, purged_openai: None) -> None:
     """A 429 carrying ``retry-after: 7`` sleeps seven seconds, not the backoff's one."""
-    limited = ProviderStatusError(429, "rate limit reached")
-    limited.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    limited = ProviderStatusError(429, "rate limit reached", headers={"retry-after": "7"})
     client, transport, sleeper = _stubbed_client([limited, _completion("after the window")])
 
     result = _run(client.chat(_synthesis_messages(), LLMParams()))
@@ -543,9 +562,8 @@ def test_a_retry_after_header_on_the_response_is_waited_out_verbatim(
     mock_mode: None, purged_openai: None
 ) -> None:
     """The SDK's rate-limit errors carry the ``httpx.Response`` they came from."""
-    response = SimpleNamespace(headers={"Retry-After": "9"})
-    limited = ProviderStatusError(429, "rate limit reached")
-    limited.response = response  # type: ignore[attr-defined]
+    response = _ProviderResponse(headers={"Retry-After": "9"})
+    limited = ProviderStatusError(429, "rate limit reached", response=response)
     client, _, sleeper = _stubbed_client([limited, _completion("recovered")])
 
     _run(client.chat(_synthesis_messages(), LLMParams()))
@@ -626,8 +644,9 @@ def test_a_hint_on_a_5xx_is_ignored_and_the_backoff_stands(
     Both are retried by the same loop, so the two policies are kept apart deliberately:
     only a 429 is promised to resolve on the schedule the provider names.
     """
-    unavailable = ProviderStatusError(503, "the model endpoint is unavailable")
-    unavailable.headers = {"retry-after": "25"}  # type: ignore[attr-defined]
+    unavailable = ProviderStatusError(
+        503, "the model endpoint is unavailable", headers={"retry-after": "25"}
+    )
     client, _, sleeper = _stubbed_client([unavailable])
 
     with pytest.raises(LLMError) as raised:
@@ -645,8 +664,7 @@ def test_a_hinted_429_that_exhausts_still_raises_rate_limited_uniformly(
     The message is still the mapper's ``model rate limited the request (...)`` — the hint
     changes only how long the gateway waited, never what a caller has to handle.
     """
-    limited = ProviderStatusError(429, "quota reached")
-    limited.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    limited = ProviderStatusError(429, "quota reached", headers={"retry-after": "7"})
     client, transport, sleeper = _stubbed_client([limited])
 
     with pytest.raises(LLMError.RateLimited) as raised:
@@ -664,8 +682,7 @@ def test_the_cap_is_injectable_so_a_test_need_not_wait_thirty_seconds(
     mock_mode: None, purged_openai: None
 ) -> None:
     """The ceiling is a constructor argument, like the rest of the retry policy."""
-    limited = ProviderStatusError(429, "quota reached")
-    limited.headers = {"retry-after": "1200"}  # type: ignore[attr-defined]
+    limited = ProviderStatusError(429, "quota reached", headers={"retry-after": "1200"})
     transport = StubTransport([limited])
     sleeper = Sleeper()
     client = ChatLLM(
@@ -690,8 +707,7 @@ def test_retry_after_seconds_reads_the_header_then_the_body(
     groq = ProviderStatusError(429, "Please try again in 4.0955s.")
     assert retry_after_seconds(groq) == 4.0955
 
-    header_only = ProviderStatusError(429, "quota reached")
-    header_only.headers = {"retry-after": "12"}  # type: ignore[attr-defined]
+    header_only = ProviderStatusError(429, "quota reached", headers={"retry-after": "12"})
     assert retry_after_seconds(header_only) == 12.0
 
     to_the_minutes = ProviderStatusError(429, "Please try again in 2m")
