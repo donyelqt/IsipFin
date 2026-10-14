@@ -75,6 +75,12 @@ adversarial review of the design.
 | `docs/prompts/table-and-number-formatting.md` | P4 — number/table formatting contract |
 | `docs/prompts/summarization-and-verification.md` | P5 — claim-level grounding verification + summary format |
 
+### Provider decisions (measured, post-build)
+
+| Doc | What it is |
+|---|---|
+| `docs/LOCAL-INFERENCE.md` | Local inference record (`qwen2.5:3b` on Ollama: per-node verdicts, measurement traps) **and §7, the provider decision**: what the token constraint actually is, the four options (Groq free / Groq Developer / larger local / hybrid) quantified with cost, latency and which pass bars each can meet, and the recommendation with its exact `LLM_PROVIDER` / `LLM_MODEL` config |
+
 ### Operations and submission
 
 | Doc | What it is |
