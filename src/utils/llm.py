@@ -294,17 +294,28 @@ class LLMError(Exception):
     #: Retried by the gateway only for 429 and 5xx (ADR-005); see ``retryable`` below.
     retryable: bool = False
 
+    #: The provider's response headers when the failure carried them — ``Retry-After``,
+    #: the hint :func:`retry_after_seconds` reads, lives here — and the response object
+    #: they came off. Both are ``None`` for a transport or decoding failure, which has no
+    #: HTTP response at all; the mapper fills them in from the SDK exception it wrapped.
+    headers: dict[str, str] | None
+    response: Any
+
     def __init__(
         self,
         message: str,
         *,
         status: int | None = None,
         attempts: int | None = None,
+        headers: dict[str, str] | None = None,
+        response: Any = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.status = status
         self.attempts = attempts
+        self.headers = headers
+        self.response = response
 
 
 class RateLimited(LLMError):
@@ -541,15 +552,57 @@ def _status_of(exc: BaseException) -> int | None:
     return status
 
 
+def _response_headers(exc: BaseException) -> dict[str, str] | None:
+    """The response headers ``exc`` carries, as a plain ``str`` map, or ``None``.
+
+    Both spellings are read — the SDK's own exceptions set ``.headers``, and ``httpx``
+    responses expose ``.headers`` on the object the error carries as ``.response``. The
+    mapping is copied into a plain ``dict`` because a case-insensitive header mapping is
+    not a ``dict`` and the declared type is one; anything else (a stub with no response at
+    all, or a header value that is not text) yields ``None``, which leaves the hint to be
+    read from the message body.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    if not isinstance(headers, dict):
+        try:
+            headers = dict(headers)
+        except (TypeError, ValueError):
+            return None
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
+        return None
+    return headers
+
+
+def _response_kwargs(exc: BaseException) -> dict[str, Any]:
+    """The provider's ``headers`` and ``response``, read off ``exc`` once.
+
+    Every mapped error carries what the provider failure did, so the retry-hint path and
+    any later diagnostic read the same object rather than reaching back through the
+    ``__cause__`` chain. The status is *not* here: each taxonomy row states its own.
+    """
+    return {
+        "headers": _response_headers(exc),
+        "response": getattr(exc, "response", None),
+    }
+
+
 def _map_provider_error(exc: BaseException) -> LLMError:
     """Translate a provider/transport exception into the typed taxonomy (ADR-005).
 
     Status codes lead and exception classes are the fallback, so a stub that raises any
-    object carrying ``status_code`` (or the real SDK's exceptions) maps identically.
+    object carrying ``status_code`` (or the real SDK's exceptions) maps identically. The
+    provider's ``headers``/``response`` travel with the mapped error, which is where the
+    429 retry hint is read from.
     """
     status = _status_of(exc)
     detail = str(exc)
     lowered = detail.lower()
+    provider = _response_kwargs(exc)
     timeout_classes = _provider_error_classes("APITimeoutError")
     auth_classes = _provider_error_classes("AuthenticationError", "PermissionDeniedError")
     rate_limit_classes = _provider_error_classes("RateLimitError")
@@ -570,10 +623,12 @@ def _map_provider_error(exc: BaseException) -> LLMError:
             f"the chat key ({LLM_KEY_ENV}, {API_KEY_ENV} or {GROQ_KEY_ENV}) is missing, wrong "
             f"or revoked: {where}; or run with {MOCK_ENV}=1 for the offline demo path."
         )
-        return LLMError.Auth(f"model authentication failed: {hint}", status=status)
+        return LLMError.Auth(f"model authentication failed: {hint}", status=status, **provider)
     if status == 429 or isinstance(exc, rate_limit_classes):
         return LLMError.RateLimited(
-            f"model rate limited the request ({detail or type(exc).__name__})", status=429
+            f"model rate limited the request ({detail or type(exc).__name__})",
+            status=429,
+            **provider,
         )
     if status in (400, 413) or isinstance(exc, bad_request_classes):
         context_markers = (
@@ -588,13 +643,19 @@ def _map_provider_error(exc: BaseException) -> LLMError:
             return LLMError.ContextLength(
                 f"the prompt exceeds the model's context window: {detail}", status=status
             )
-        return LLMError(f"the model rejected the request as invalid: {detail}", status=status)
+        return LLMError(
+            f"the model rejected the request as invalid: {detail}", status=status, **provider
+        )
     if status is not None and 500 <= status < 600:
         # Retried by ``_is_retryable`` like a 429, but not reported as a rate limit: a
         # 500/502/503 is the endpoint being unavailable, which the node's failure table
         # treats differently ("try again" beats "you are being throttled").
-        return LLMError(f"the model endpoint returned a server error: {detail}", status=status)
-    return LLMError(f"model request failed ({type(exc).__name__}: {detail})", status=status)
+        return LLMError(
+            f"the model endpoint returned a server error: {detail}", status=status, **provider
+        )
+    return LLMError(
+        f"model request failed ({type(exc).__name__}: {detail})", status=status, **provider
+    )
 
 
 # --- the OpenAI-compatible client ------------------------------------------------
