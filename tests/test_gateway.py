@@ -38,6 +38,7 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -47,6 +48,7 @@ from src.utils.llm import (
     GROQ_BASE_URL,
     PROVIDER_DEFAULTS,
     REDACTED_KEY,
+    RETRY_AFTER_CAP_S,
     ChatLLM,
     ChatResult,
     LLMError,
@@ -56,6 +58,7 @@ from src.utils.llm import (
     build_llm,
     resolved_config,
     resolved_provider,
+    retry_after_seconds,
     validate_json_schema,
 )
 
@@ -510,6 +513,196 @@ def test_a_rate_limit_that_recovers_answers_without_raising(
     assert result.text == "recovered"
     assert len(transport.calls) == 2
     assert sleeper.delays == [1.0]
+
+
+# --- 3b. a 429 that names its own retry hint ---------------------------------------
+#
+# Groq answers a tokens-per-minute limit with the exact window: "Rate limit reached for
+# model `openai/gpt-oss-120b` ... Limit 8000, Used 6034, Requested 2511. Please try again
+# in 4.0955s." Retrying on our own 1s/2s schedule lands straight back inside that window,
+# which is how one 429 becomes three and a turn degrades. The hint is read from the
+# response header when the SDK exposes one and otherwise out of the message body, capped,
+# and used verbatim; the exponential backoff stays the policy for every other retry.
+
+
+def test_a_retry_after_header_is_waited_out_verbatim(mock_mode: None, purged_openai: None) -> None:
+    """A 429 carrying ``retry-after: 7`` sleeps seven seconds, not the backoff's one."""
+    limited = ProviderStatusError(429, "rate limit reached")
+    limited.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    client, transport, sleeper = _stubbed_client([limited, _completion("after the window")])
+
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert result.text == "after the window"
+    assert len(transport.calls) == 2
+    assert sleeper.delays == [7.0], "the provider's hint must win over the computed backoff"
+    assert sleeper.delays != [1.0]
+
+
+def test_a_retry_after_header_on_the_response_is_waited_out_verbatim(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The SDK's rate-limit errors carry the ``httpx.Response`` they came from."""
+    response = SimpleNamespace(headers={"Retry-After": "9"})
+    limited = ProviderStatusError(429, "rate limit reached")
+    limited.response = response  # type: ignore[attr-defined]
+    client, _, sleeper = _stubbed_client([limited, _completion("recovered")])
+
+    _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert sleeper.delays == [9.0], "the response header is the standard path for the hint"
+
+
+def test_the_groq_message_body_hint_is_parsed_and_used(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The observed format: Groq states the window inside the error body, not a header.
+
+    The body is quoted verbatim from a real Groq free-tier tokens-per-minute response.
+    The gateway parsed seconds out of it and slept that long, capped, instead of guessing.
+    """
+    groq_body = (
+        "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+        "`openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, Used 6034, "
+        "Requested 2511. Please try again in 4.0955s.', 'type': 'tokens', "
+        "'code': 'rate_limit_exceeded'}}"
+    )
+    client, transport, sleeper = _stubbed_client(
+        [ProviderStatusError(429, groq_body), _completion("recovered")]
+    )
+
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert result.text == "recovered"
+    assert len(transport.calls) == 2
+    assert sleeper.delays == [4.0955]
+
+
+def test_a_hint_longer_than_the_cap_waits_exactly_the_cap(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """A 43.95s hint would stall the turn, so it is clamped to the stated ceiling.
+
+    ``RETRY_AFTER_CAP_S`` is 30s: a rolling TPM window is short enough that half a minute
+    of waiting has already moved the request into a fresh one, and two capped retries put
+    the worst case at 60s of waiting — inside ``REQUEST_TIMEOUT_S`` instead of a hold.
+    """
+    groq_body = (
+        "Error code: 429 - {'error': {'message': 'Rate limit reached ... Please try again "
+        "in 43.95s.', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    )
+    client, transport, sleeper = _stubbed_client([ProviderStatusError(429, groq_body)])
+
+    with pytest.raises(LLMError.RateLimited):
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert len(transport.calls) == 3, "the cap caps the wait, never the attempt budget"
+    assert RETRY_AFTER_CAP_S == 30.0
+    assert sleeper.delays == [30.0, 30.0]
+
+
+def test_a_rate_limit_without_any_hint_keeps_the_backoff(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """No parseable hint is not a hint: the exponential schedule is untouched."""
+    unparseable = (
+        "Error code: 429 - {'error': {'message': 'quota reached; retry later (HTTP-date: "
+        "Wed, 21 Oct 2026 07:28:00 GMT)', 'code': 'rate_limit_exceeded'}}"
+    )
+    client, transport, sleeper = _stubbed_client([ProviderStatusError(429, unparseable)])
+
+    with pytest.raises(LLMError.RateLimited):
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert len(transport.calls) == 3
+    assert sleeper.delays == [1.0, 2.0], "the backoff policy is unchanged when nothing named a wait"
+
+
+def test_a_hint_on_a_5xx_is_ignored_and_the_backoff_stands(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """A server error's ``Retry-After`` is a shed-load statement, not a rate window.
+
+    Both are retried by the same loop, so the two policies are kept apart deliberately:
+    only a 429 is promised to resolve on the schedule the provider names.
+    """
+    unavailable = ProviderStatusError(503, "the model endpoint is unavailable")
+    unavailable.headers = {"retry-after": "25"}  # type: ignore[attr-defined]
+    client, _, sleeper = _stubbed_client([unavailable])
+
+    with pytest.raises(LLMError) as raised:
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert raised.value.status == 503
+    assert sleeper.delays == [1.0, 2.0]
+
+
+def test_a_hinted_429_that_exhausts_still_raises_rate_limited_uniformly(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """Every attempt waited out the hint, so the failure is the same typed one as before.
+
+    The message is still the mapper's ``model rate limited the request (...)`` — the hint
+    changes only how long the gateway waited, never what a caller has to handle.
+    """
+    limited = ProviderStatusError(429, "quota reached")
+    limited.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    client, transport, sleeper = _stubbed_client([limited])
+
+    with pytest.raises(LLMError.RateLimited) as raised:
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert raised.value.status == 429
+    assert raised.value.attempts == 3
+    assert "model rate limited the request" in str(raised.value)
+    assert "429" in str(raised.value)
+    assert transport.calls and len(transport.calls) == 3
+    assert sleeper.delays == [7.0, 7.0]
+
+
+def test_the_cap_is_injectable_so_a_test_need_not_wait_thirty_seconds(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The ceiling is a constructor argument, like the rest of the retry policy."""
+    limited = ProviderStatusError(429, "quota reached")
+    limited.headers = {"retry-after": "1200"}  # type: ignore[attr-defined]
+    transport = StubTransport([limited])
+    sleeper = Sleeper()
+    client = ChatLLM(
+        transport,
+        model="stub-model",
+        sleep=sleeper,
+        jitter=_identity,
+        retry_after_cap_s=5.0,
+    )
+
+    with pytest.raises(LLMError.RateLimited):
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert client.client is transport
+    assert sleeper.delays == [5.0, 5.0], "the cap bound the provider's 1200s"
+
+
+def test_retry_after_seconds_reads_the_header_then_the_body(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The two source orders, and the values that are deliberately not a hint."""
+    groq = ProviderStatusError(429, "Please try again in 4.0955s.")
+    assert retry_after_seconds(groq) == 4.0955
+
+    header_only = ProviderStatusError(429, "quota reached")
+    header_only.headers = {"retry-after": "12"}  # type: ignore[attr-defined]
+    assert retry_after_seconds(header_only) == 12.0
+
+    to_the_minutes = ProviderStatusError(429, "Please try again in 2m")
+    assert retry_after_seconds(to_the_minutes) == 120.0
+
+    assert retry_after_seconds(ProviderStatusError(429, "quota reached")) is None
+    assert retry_after_seconds(ProviderStatusError(429, "try again in 0s")) is None
+    assert retry_after_seconds(ProviderStatusError(429, "retry-after: soon")) is None
+
+    huge = ProviderStatusError(429, "Please try again in 900s.")
+    assert retry_after_seconds(huge) == 900.0, "the parser reports what the provider said"
 
 
 # --- 4. failures that must never be retried ---------------------------------------
