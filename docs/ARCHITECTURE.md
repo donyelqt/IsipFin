@@ -29,20 +29,20 @@
 
 ```mermaid
 flowchart LR
-    PDF[PDF bytes] --> Parse[pypdf extract<br/>per page]
-    Parse --> Tables{Table region?}
-    Tables -- yes --> TPL[pdfplumber<br/>table to markdown]
-    Tables -- no --> TXT[text block]
-    TPL --> Blocks[Block list:<br/>kind, page, section_path]
+    PDF["PDF bytes"] --> Parse["pypdf extract per page"]
+    Parse --> Tables{"Table region?"}
+    Tables -- yes --> TPL["pdfplumber table to markdown"]
+    Tables -- no --> TXT["text block"]
+    TPL --> Blocks["Block list: kind, page, section_path"]
     TXT --> Blocks
-    Blocks --> Headings[detect headings<br/>+ section paths]
-    Headings --> Parents[parent chunks<br/>~1000 tokens]
-    Headings --> Children[child chunks<br/>~250 tokens, overlap 50]
-    Parents --> Embed[embed children]
+    Blocks --> Headings["detect headings + section paths"]
+    Headings --> Parents["parent chunks ~1000 tokens"]
+    Headings --> Children["child chunks ~250 tokens, overlap 50"]
+    Parents --> Embed["embed children"]
     Children --> Embed
-    Embed --> FAISS[(FAISS index<br/>data/index/faiss)]
-    Children --> BM25[(BM25 pickle<br/>data/index/bm25)]
-    Parents --> Meta[(chunks.jsonl<br/>parent text + provenance)]
+    Embed --> FAISS["FAISS index data/index/faiss"]
+    Children --> BM25["BM25 pickle data/index/bm25"]
+    Parents --> Meta["chunks.jsonl parent text + provenance"]
 ```
 
 Invariants: pages are 1-based; every block carries `section_path`; parent linkage is by
@@ -53,24 +53,24 @@ rebuilds nothing.
 
 ```mermaid
 flowchart TD
-    Q[User question] --> C{Follow-up?}<br/>pronoun / "that" / "it" / ellipsis
-    C -- yes --> CTX[contextualize_question<br/>rewrite standalone]
+    Q["User question"] --> C{"Follow-up? / pronoun / that / it / ellipsis"}
+    C -- yes --> CTX["contextualize_question rewrite standalone"]
     C -- no --> ANA
-    CTX --> ANA[analyze_question<br/>classify + plan, JSON schema]
-    ANA --> R{route}
-    R -- simple --> RET[hybrid_retrieve]
-    R -- multi-part --> DEC[decompose_question]
-    R -- out-of-scope / no-docs --> REF[refuse<br/>name coverage gap]
+    CTX --> ANA["analyze_question classify + plan, JSON schema"]
+    ANA --> R{"route"}
+    R -- simple --> RET["hybrid_retrieve"]
+    R -- multi-part --> DEC["decompose_question"]
+    R -- out-of-scope / no-docs --> REF["refuse name coverage gap"]
     DEC --> RET
-    RET --> RRF[RRF fuse dense+sparse<br/>expand child to parent]
-    RRF --> GATE{best fused score<br/>> tau?}
-    GATE -- no --> RETRY[rewrite query once<br/>then GR2]
-    GATE -- yes --> SYN[synthesize_answer<br/>citation-constrained]
+    RET --> RRF["RRF fuse dense+sparse expand child to parent"]
+    RRF --> GATE{"best fused score > tau?"}
+    GATE -- no --> RETRY["rewrite query once then GR2"]
+    GATE -- yes --> SYN["synthesize_answer citation-constrained"]
     RETRY --> SYN
-    SYN --> NUM[numeric pre-pass<br/>deterministic, no LLM]
-    NUM --> VER{groundedness check<br/>LLM + checks.py}
-    VER -- fail --> RETRIM[drop unsupported claims<br/>mark ungrounded]
-    VER -- pass --> OUT[AnswerEnvelope]
+    SYN --> NUM["numeric pre-pass deterministic, no LLM"]
+    NUM --> VER{"groundedness check LLM + checks.py"}
+    VER -- fail --> RETRIM["drop unsupported claims mark ungrounded"]
+    VER -- pass --> OUT["AnswerEnvelope"]
     RETRIM --> OUT
     REF --> OUT
 ```
