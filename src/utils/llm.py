@@ -7,18 +7,29 @@ is testable with a stub and a provider change is a ``base_url`` env change — O
 OpenAI, Ollama (``http://localhost:11434/v1``), vLLM or Groq
 (``https://api.groq.com/openai/v1``) all work without a code edit.
 
-**Credential resolution.** The chat key and endpoint are resolved first-hit-wins:
-``LLM_API_KEY`` → ``OPENAI_API_KEY`` → ``GROQ_API_KEY`` for the key, and ``LLM_BASE_URL`` →
-``OPENAI_BASE_URL`` → Groq's URL (only when the key came from ``GROQ_API_KEY`` and no base
-URL is configured anywhere) for the endpoint. The model is ``params.model`` →
-``OPENAI_MODEL`` → :data:`DEFAULT_MODEL`. Those two overrides exist for exactly the settings
-an ambient environment demonstrably hijacks, because ``.env`` is loaded with
-``override=False``: a real environment variable beats the file, so on a host that already
-exports ``OPENAI_API_KEY`` and ``OPENAI_BASE_URL`` a credential written into ``.env`` is
+**Credential resolution.** Four settings decide where a request goes, and each has one
+primary name: ``LLM_PROVIDER`` (which endpoint family — ``openai`` is the default, plus
+``groq``, ``nvidia``, ``ollama``, ``vllm``, ``azure``), ``LLM_API_KEY`` (the key),
+``LLM_BASE_URL`` (an endpoint override, for a self-hosted or Azure deployment this module
+does not know a host for) and ``LLM_MODEL`` (the model id). The chain is:
+
+* provider: ``LLM_PROVIDER`` → ``groq`` when ``GROQ_API_KEY`` supplied the key → ``openai``;
+* key: ``LLM_API_KEY`` → ``OPENAI_API_KEY`` → ``GROQ_API_KEY``;
+* base URL: ``LLM_BASE_URL`` → the provider's own endpoint when ``LLM_PROVIDER`` named one
+  → ``OPENAI_BASE_URL`` → Groq's URL (when the key came from ``GROQ_API_KEY``) → the
+  provider's default endpoint. An explicitly named provider outranks the ``OPENAI_BASE_URL``
+  alias because naming the vendor is a deliberate act, and an ambient export is not;
+* model: ``params.model`` → ``LLM_MODEL`` → ``OPENAI_MODEL`` → the provider's default model.
+
+The ``OPENAI_*`` spellings are aliases at lower precedence, because that is what hosts, CI
+jobs and tutorials export and dropping them would break working setups; the names describe
+the wire protocol, not a vendor. ``GROQ_API_KEY`` stays as a key alias and implies
+``LLM_PROVIDER=groq`` — the convenience that one name already promised. The ``LLM_*``
+overrides outrank both because ``.env`` is loaded with ``override=False``: a real
+environment variable beats the file, so on a host that already exports ``OPENAI_API_KEY``
+and ``OPENAI_BASE_URL`` a credential written into ``.env`` under that name is
 silently ignored and the ambient one is sent instead — which is the failure
-:func:`resolved_config` exists to make visible, with the key redacted. The model needs no
-override: ``OPENAI_MODEL`` names the OpenAI-compatible wire protocol rather than a vendor, so
-that one variable already addresses OpenAI, Groq, NVIDIA and Ollama.
+:func:`resolved_config` exists to make visible, with the key redacted.
 
 **Retry policy (ADR-005).** HTTP 429 and HTTP 5xx are retried with capped exponential
 backoff plus jitter — ``min(1s * 2**(attempt-1), 30s)`` with half-fixed/half-random
@@ -61,8 +72,13 @@ from urllib.parse import urlsplit
 __all__ = [
     "BACKOFF_BASE_S",
     "BACKOFF_CAP_S",
+    "DEFAULT_MODEL",
+    "DEFAULT_PROVIDER",
     "GROQ_BASE_URL",
+    "LLM_PROVIDER_ENV",
     "MAX_ATTEMPTS",
+    "MODEL_ENV",
+    "PROVIDER_DEFAULTS",
     "REDACTED_KEY",
     "REQUEST_TIMEOUT_S",
     "Auth",
@@ -90,33 +106,69 @@ __all__ = [
 # from scripts (which is not a package), and the two modules must agree on the env surface.
 MOCK_ENV = "MOCK_LLM"
 
-# The chat key and endpoint are resolved first-hit-wins:
+# --- one name per setting, and the precedence that decides them ----------------------
 #
+# THE PRECEDENCE CHAIN, IN ONE BLOCK — read this before editing anything below.
+#
+#   provider: LLM_PROVIDER -> groq, implied by GROQ_API_KEY -> openai (the default)
 #   key:      LLM_API_KEY  -> OPENAI_API_KEY -> GROQ_API_KEY
-#   base URL: LLM_BASE_URL -> OPENAI_BASE_URL -> Groq's URL, but only when the key came
-#             from GROQ_API_KEY and no base URL is configured anywhere
-#   model:    OPENAI_MODEL -> DEFAULT_MODEL (params.model beats both)
+#   base URL: LLM_BASE_URL -> the provider's endpoint when LLM_PROVIDER named one ->
+#             OPENAI_BASE_URL -> Groq's URL (only when the key came from GROQ_API_KEY) ->
+#             the provider's own default endpoint
+#   model:    params.model -> LLM_MODEL -> OPENAI_MODEL -> the provider's default model
 #
-# WHY THE TWO LLM_* OVERRIDES EXIST — AND WHY THE MODEL HAS NONE: src/utils/settings.py
-# loads .env with override=False, so a real environment variable always beats the file.
-# This host exports OPENAI_API_KEY and OPENAI_BASE_URL, so a credential written into .env
-# under those names is silently ignored and the ambient pair is used instead — a Groq key
-# sent to an NVIDIA endpoint, for instance. The overrides therefore cover exactly the two
-# settings an ambient environment demonstrably hijacks. The model is neither host-set nor
-# vendor-specific: OPENAI_MODEL names the OpenAI-compatible wire protocol, so the same
-# variable addresses OpenAI, Groq, NVIDIA and Ollama, and a second name for it would be
-# surface without purpose. GROQ_API_KEY exists because that is the name a user reaches for,
-# and it implies Groq's base URL so that one variable is a working Groq configuration.
+# Each setting has exactly one PRIMARY name — the LLM_* one. The OPENAI_* spellings are
+# aliases that stay accepted at LOWER precedence, and GROQ_API_KEY is a key alias that also
+# implies the provider; neither ever wins over its LLM_* counterpart.
+#
+# WHY THE LLM_* NAMES EXIST: src/utils/settings.py loads .env with override=False, so a real
+# environment variable always beats the file. This host exports OPENAI_API_KEY and
+# OPENAI_BASE_URL, so a credential written into .env under those names is silently ignored
+# and the ambient pair is used instead — a Groq key sent to an NVIDIA endpoint, for
+# instance. The LLM_* names cover the settings an ambient environment demonstrably hijacks.
+#
+# WHY THE ALIASES STAY: hosts, CI jobs and tutorials export OPENAI_API_KEY /
+# OPENAI_BASE_URL / OPENAI_MODEL by default, and those names describe the OpenAI-compatible
+# WIRE PROTOCOL, not a vendor — one spelling already addresses OpenAI, Groq, NVIDIA, Ollama
+# and vLLM. LLM_PROVIDER exists to say the vendor out loud when the protocol cannot infer
+# it (an unknown endpoint, or a default model to pick).
+#
+# WHY GROQ_API_KEY STAYS: that is the name a user reaches for, and it implies the Groq
+# provider, so setting that one variable alone is a working Groq configuration.
+#
+# MOCK_LLM is checked first in build_llm and short-circuits every name below: nothing in
+# this block is read on the offline path.
+LLM_PROVIDER_ENV = "LLM_PROVIDER"
 LLM_KEY_ENV = "LLM_API_KEY"
 LLM_BASE_URL_ENV = "LLM_BASE_URL"
+LLM_MODEL_ENV = "LLM_MODEL"
 API_KEY_ENV = "OPENAI_API_KEY"
 BASE_URL_ENV = "OPENAI_BASE_URL"
 MODEL_ENV = "OPENAI_MODEL"
 GROQ_KEY_ENV = "GROQ_API_KEY"
+
 #: Groq's OpenAI-compatible chat endpoint: the fallback that makes ``GROQ_API_KEY`` alone work.
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+#: The provider a bare configuration means, and the one an unrecognised ``LLM_PROVIDER``
+#: falls back to rather than failing: a typo in a vendor name is a configuration slip, and
+#: the request still has to go to the OpenAI-compatible protocol the user asked for.
+DEFAULT_PROVIDER = "openai"
+
+#: The providers this module can aim at without being told an endpoint, and the default
+#: model each one stands for. ``azure`` deliberately has no endpoint: an Azure deployment
+#: lives at a per-deployment URL, so it selects no default and expects ``LLM_BASE_URL`` —
+#: the override exists for exactly that case. ``None`` as a model means "no opinion": the
+#: deployment names its own, and a wrong guess here would fail the request.
+PROVIDER_DEFAULTS: dict[str, tuple[str | None, str | None]] = {
+    "openai": (DEFAULT_BASE_URL, DEFAULT_MODEL),
+    "groq": (GROQ_BASE_URL, "openai/gpt-oss-120b"),
+    "nvidia": ("https://integrate.api.nvidia.com/v1", "meta/llama-3.1-8b-instruct"),
+    "ollama": ("http://localhost:11434/v1", None),
+    "vllm": ("http://localhost:8000/v1", None),
+    "azure": (None, None),
+}
 
 #: Fixed-length stand-in for the credential in diagnostics: no prefix, no length and no
 #: character of the key, so a resolved configuration is always safe to log or assert on.
@@ -672,8 +724,8 @@ class ChatLLM:
         model = params.model or self._model
         if not model:
             raise LLMError(
-                f"no model configured: set {MODEL_ENV} or pass params.model "
-                "(the sidebar's model picker writes it)"
+                f"no model configured: set {LLM_MODEL_ENV} or {MODEL_ENV} or pass "
+                "params.model (the sidebar's model picker writes it)"
             )
         return model
 
@@ -778,6 +830,7 @@ class _Credentials:
     key_source: str | None
     base_url: str
     base_url_source: str | None
+    provider: str
 
 
 @dataclass(frozen=True)
@@ -790,9 +843,17 @@ class ResolvedConfig:
     ``None`` exactly when no key resolved at all, i.e. when :func:`build_llm` would raise
     :class:`LLMError.Auth`; ``api_key`` is :data:`REDACTED_KEY` or ``""``, never a key and
     never a prefix or length of one.
+
+    ``configured_provider`` is the same question answered from the *settings* instead of
+    the wire: what ``LLM_PROVIDER`` named (or ``GROQ_API_KEY`` implied, else
+    :data:`DEFAULT_PROVIDER`). It is what picks the default endpoint and default model, and
+    keeping it beside the host-derived ``provider`` is what makes a mismatch legible — a
+    ``configured_provider`` of ``groq`` over ``provider`` of ``openai-compatible`` is a Groq
+    key pointed at an NVIDIA endpoint, which is the failure this diagnostic exists to show.
     """
 
     provider: str | None
+    configured_provider: str | None
     api_key: str
     base_url: str
     model: str
@@ -813,34 +874,82 @@ def _first_env(*names: str) -> tuple[str, str | None]:
     return "", None
 
 
-def _resolve_credentials() -> _Credentials:
-    """The key and endpoint, first-hit-wins, per the chain documented at the config block.
+def _select_provider() -> tuple[str, str | None]:
+    """The provider whose defaults apply, and the variable that named it.
 
-    The Groq endpoint follows ``GROQ_API_KEY`` only when the key came from there *and* no
-    base URL is configured anywhere: the fallback exists so that setting that one variable
-    yields a working Groq configuration, which is what the name promises, and it never
-    overrides an endpoint the user spelled out.
+    ``LLM_PROVIDER`` wins when set; otherwise ``GROQ_API_KEY`` implies ``groq`` — the
+    convenience that one name already promised. A provider this module does not know
+    resolves to :data:`DEFAULT_PROVIDER` rather than raising: a typo in a vendor name is a
+    configuration slip, and the OpenAI-compatible protocol was still what was asked for.
+    The second element tells the caller whether the vendor was named *explicitly*, which
+    is what lets an explicit provider outrank an ambient ``OPENAI_BASE_URL``.
+    """
+    explicit, source = _first_env(LLM_PROVIDER_ENV)
+    if explicit:
+        name = explicit.lower()
+        return (name if name in PROVIDER_DEFAULTS else DEFAULT_PROVIDER), source
+    if _first_env(GROQ_KEY_ENV)[0]:
+        return "groq", GROQ_KEY_ENV
+    return DEFAULT_PROVIDER, None
+
+
+def _resolve_credentials(configured_provider: str, provider_source: str | None) -> _Credentials:
+    """The key and endpoint, per the chain documented at the config block.
+
+    The endpoint is the first of, in order:
+
+    1. ``LLM_BASE_URL`` — the override for a deployment this module has no host for
+       (self-hosted, Azure);
+    2. the provider's own endpoint, **when ``LLM_PROVIDER`` named a provider** — naming the
+       vendor is a deliberate act, and it outranks the protocol-named alias a host or a
+       CI job happens to export. An Azure deployment signs up for "supply the endpoint
+       yourself", which this step makes explicit rather than silently inheriting whatever
+       ambient export is around;
+    3. ``OPENAI_BASE_URL`` — the alias, which is the historical default resolution;
+    4. Groq's URL when the key came from ``GROQ_API_KEY``, the convenience that name
+       already promised;
+    5. the provider's default endpoint as the last resort.
+
+    ``base_url_source`` is ``None`` whenever the endpoint came from a *provider default*
+    rather than a variable, because it names the variable that supplied it — and a default
+    is exactly the case no variable did.
     """
     api_key, key_source = _first_env(LLM_KEY_ENV, API_KEY_ENV, GROQ_KEY_ENV)
-    base_url, base_url_source = _first_env(LLM_BASE_URL_ENV, BASE_URL_ENV)
+    base_url, base_url_source = _first_env(LLM_BASE_URL_ENV)
+    provider_endpoint, _ = PROVIDER_DEFAULTS.get(configured_provider, (None, None))
+    if not base_url and provider_source == LLM_PROVIDER_ENV:
+        base_url, base_url_source = provider_endpoint or "", None
+    if not base_url:
+        base_url, base_url_source = _first_env(BASE_URL_ENV)
     if not base_url and key_source == GROQ_KEY_ENV:
         base_url, base_url_source = GROQ_BASE_URL, GROQ_KEY_ENV
+    if not base_url and provider_endpoint:
+        base_url, base_url_source = provider_endpoint, None
     return _Credentials(
         api_key=api_key,
         key_source=key_source,
-        base_url=base_url or DEFAULT_BASE_URL,
+        base_url=base_url,
         base_url_source=base_url_source,
+        provider=configured_provider,
     )
 
 
-def _select_model(params: LLMParams | None) -> str:
-    """The model a build would configure: ``params.model``, else ``OPENAI_MODEL``, else default.
+def _select_model(params: LLMParams | None, provider: str = DEFAULT_PROVIDER) -> str:
+    """The model a build would configure: ``params.model``, ``LLM_MODEL``, ``OPENAI_MODEL``.
 
     The per-call override keeps winning over every variable — the sidebar's picker writes
-    ``params.model``, and that precedence is part of the frozen contract.
+    ``params.model``, and that precedence is part of the frozen contract. After the two
+    variables, the provider's default model answers; when it has no opinion the built-in
+    default is the last word, so a model is always named rather than left blank.
     """
     requested = params.model if params is not None else None
-    return requested or os.environ.get(MODEL_ENV, "").strip() or DEFAULT_MODEL
+    if requested:
+        return requested
+    from_env, _ = _first_env(LLM_MODEL_ENV, MODEL_ENV)
+    if from_env:
+        return from_env
+    _, provider_model = PROVIDER_DEFAULTS.get(provider, (None, None))
+    return provider_model or DEFAULT_MODEL
 
 
 def _provider_label(base_url: str) -> str:
@@ -868,19 +977,25 @@ def resolved_config(params: LLMParams | None = None) -> ResolvedConfig:
     ``.env``. ``params`` mirrors :func:`build_llm`: when given, its ``model`` is the
     resolved one.
     """
-    credentials = _resolve_credentials()
+    provider, provider_source = _select_provider()
+    credentials = _resolve_credentials(provider, provider_source)
     return ResolvedConfig(
         provider=_provider_label(credentials.base_url) if credentials.api_key else None,
+        configured_provider=credentials.provider if credentials.api_key else None,
         api_key=REDACTED_KEY if credentials.api_key else "",
         base_url=credentials.base_url,
-        model=_select_model(params),
+        model=_select_model(params, credentials.provider),
         key_source=credentials.key_source,
         base_url_source=credentials.base_url_source,
     )
 
 
 def resolved_provider() -> str | None:
-    """The provider the gateway would talk to, or ``None`` when no key resolved."""
+    """The provider the gateway would talk to, or ``None`` when no key resolved.
+
+    Read from the endpoint's host, so it names where the request would go even when
+    ``LLM_PROVIDER`` was never set.
+    """
     return resolved_config().provider
 
 
@@ -889,11 +1004,14 @@ def build_llm(params: LLMParams | None = None) -> ChatClient:
 
     ``MOCK_LLM=1`` returns :class:`src.utils.mock_llm.MockLLM` — deterministic, offline,
     no key needed; that branch decides before any credential is read, so an ambient
-    ``OPENAI_API_KEY`` cannot affect it. Otherwise a real client is built from the
-    first-hit-wins chain documented at the config block: the key from ``LLM_API_KEY``,
-    ``OPENAI_API_KEY`` or ``GROQ_API_KEY`` (the last implying Groq's base URL), the
-    endpoint from ``LLM_BASE_URL`` or ``OPENAI_BASE_URL``, and the model from
-    ``OPENAI_MODEL``, overridable per call through ``params.model``. No node constructs
+    ``OPENAI_API_KEY`` cannot affect it. Otherwise a real client is built from the chain
+    documented at the config block: ``LLM_PROVIDER`` names the endpoint family and supplies
+    its default endpoint and default model; the key comes from ``LLM_API_KEY``,
+    ``OPENAI_API_KEY`` or ``GROQ_API_KEY`` (the last implying Groq's provider and URL);
+    ``LLM_BASE_URL`` or ``OPENAI_BASE_URL`` override the endpoint; and the model is
+    ``LLM_MODEL`` / ``OPENAI_MODEL`` overridable per call through ``params.model``. A
+    provider with no endpoint of its own (Azure) requires ``LLM_BASE_URL`` rather than
+    falling back to a host it does not belong to. No node constructs
     a client itself: this factory is the single place configuration is read, which is what
     keeps the graph testable with a stub client and the demo runnable with no key at all.
     """
@@ -902,14 +1020,25 @@ def build_llm(params: LLMParams | None = None) -> ChatClient:
 
         return MockLLM()
 
-    credentials = _resolve_credentials()
+    provider, provider_source = _select_provider()
+    credentials = _resolve_credentials(provider, provider_source)
     if not credentials.api_key:
         raise LLMError.Auth(
             f"chat needs a key: none of {LLM_KEY_ENV}, {API_KEY_ENV} or {GROQ_KEY_ENV} is "
             f"set and {MOCK_ENV} is not '1'. Either export {LLM_KEY_ENV} — or "
-            f"{GROQ_KEY_ENV}, whose endpoint follows the key — with {LLM_BASE_URL_ENV} / "
-            f"{MODEL_ENV} as needed, or run with {MOCK_ENV}=1 for the deterministic "
-            "offline path that needs no key and no network."
+            f"{GROQ_KEY_ENV}, whose provider and endpoint follow the key — with "
+            f"{LLM_PROVIDER_ENV}, {LLM_BASE_URL_ENV} and {LLM_MODEL_ENV} as needed, or run "
+            f"with {MOCK_ENV}=1 for the deterministic offline path that needs no key and no "
+            "network."
+        )
+    if not credentials.base_url:
+        # A provider this module has no endpoint for (Azure's per-deployment URL). Sending
+        # that key to a default host would be a silent misroute, so it is a stated error.
+        raise LLMError.Auth(
+            f"provider {provider!r} has no default endpoint: set {LLM_BASE_URL_ENV} to the "
+            "deployment's URL (the override exists for a self-hosted or per-deployment "
+            "endpoint this module cannot guess), or pick a provider from "
+            f"{', '.join(sorted(PROVIDER_DEFAULTS))}"
         )
     try:
         from openai import AsyncOpenAI
@@ -927,4 +1056,4 @@ def build_llm(params: LLMParams | None = None) -> ChatClient:
         # is attempted three times in total, not three times per SDK-level attempt.
         max_retries=0,
     )
-    return ChatLLM(client, model=_select_model(params))
+    return ChatLLM(client, model=_select_model(params, credentials.provider))
