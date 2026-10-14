@@ -157,7 +157,12 @@ self-hosted endpoint; `LLM_API_KEY` is the single chat credential; `LLM_MODEL` i
 id, still overridable per call through `params.model`. Because Groq exposes no
 `/embeddings` endpoint, chat and embeddings are separate settings — a Groq chat config pairs
 with `EMBEDDING_PROVIDER=local` — and the Groq model must be one that accepts
-`response_format: json_schema` (`analyze_question`, `groundedness_check`). `.env.example`
+`response_format: json_schema` (`analyze_question`, `groundedness_check`). Separately,
+`LLM_PROVIDER=ollama` is **not a supported configuration**: measured against `qwen2.5:3b`, only
+P2 (`contextualize_question`) can be served locally — P1 misroutes superlative questions, P3
+emits no citation markers, P5 over-trims — so a keyless local run is viable today only via
+`MOCK_LLM=1`; the full per-node verdict and the three measurement traps are in
+`docs/LOCAL-INFERENCE.md`. `.env.example`
 is the worked reference for all of it.
 
 ## 5. Code Style
