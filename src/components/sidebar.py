@@ -61,7 +61,6 @@ unavailable states are all reachable — see each function's notes.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -75,7 +74,7 @@ from src.components.theme import rail_label as theme_rail_label
 from src.components.theme import rail_status_card as theme_rail_status_card
 from src.core.retrieval import DEFAULT_K as DEFAULT_RETRIEVAL_K
 from src.store.db import default_db_path
-from src.utils.llm import MODEL_ENV, LLMParams
+from src.utils.llm import LLMParams, resolved_config
 
 if TYPE_CHECKING:  # contract types only — no runtime import, so the module stays leaf-level
     from src.components.upload import IndexStatus
@@ -199,17 +198,15 @@ NEW_SESSION_NO_STORE_HELP = (
 
 # --- the parameter surface (GRADING-ALIGNMENT.md row 16) ------------------------
 
-#: The environment variable that names the configured model, read at import so the
-#: picker is seeded from what *this deployment* set rather than a hardcoded value.
-ENV_MODEL = os.environ.get(MODEL_ENV) or ""
-
-#: The model picker's options. The configured model leads the list (so a grader who
-#: set ``OPENAI_MODEL`` sees **their** model selected), followed by the endpoints
-#: ``docs/adr/ADR-005`` names as drop-in compatible — so switching provider is a
-#: pick, not an edit. ``""`` is the "provider default" option, which Streamlit
-#: renders as the placeholder state rather than a selectable blank row.
+#: The model picker's hardcoded options, leading with ``""`` — the "provider
+#: default" row Streamlit renders as the placeholder state rather than a
+#: selectable blank. The deployment's own model is **not** part of this tuple:
+#: it is resolved per render from the gateway's resolver and put in front (see
+#: :func:`_configured_model`), so the list cannot go stale against a name that is
+#: only known from the environment. The rest are models ``docs/adr/ADR-005``
+#: names as drop-in compatible, so switching provider is a pick rather than an edit.
 DEFAULT_MODELS: tuple[str, ...] = (
-    ENV_MODEL,
+    "",
     "gpt-4o",
     "gpt-4o-mini",
     "gpt-4.1-mini",
@@ -996,6 +993,30 @@ def render_model_params() -> LLMParams:
     return _current_params()
 
 
+def _configured_model() -> str:
+    """The model this deployment resolved, straight from the gateway's resolver.
+
+    The picker used to seed from ``OPENAI_MODEL`` alone, which made the primary
+    name — ``LLM_MODEL``, the one the quick start tells a reader to set — a
+    model the picker did not show. Reading the gateway's own resolver
+    (:func:`src.utils.llm.resolved_config`) instead of one variable is the same
+    fix the credential chain got: the surface is defined in one place, so the
+    control cannot drift from what a request will actually use.
+
+    ``MOCK_LLM=1`` is deliberately not branched on here. :func:`resolved_config`
+    never builds a client and never imports ``openai``, and the model chain is
+    read before the mock short-circuit on the real path anyway, so the offline
+    demo resolves exactly the same names with no key present.
+
+    Returns:
+        The resolved model id, or ``""`` when the environment names none and
+        the provider has no default of its own (which the built-in default
+        answers, so this is only ``""`` for an unknown provider).
+    """
+
+    return resolved_config().model or ""
+
+
 def _param_defaults() -> dict[str, Any]:
     """The factory values: the deployment's model, and the documented defaults.
 
@@ -1005,7 +1026,7 @@ def _param_defaults() -> dict[str, Any]:
     """
 
     return {
-        "model": ENV_MODEL or "gpt-4o-mini",
+        "model": _configured_model(),
         "temperature": TEMP_DEFAULT,
         "top_p": TOP_P_DEFAULT,
         "max_tokens": MAX_TOKENS_DEFAULT,
@@ -1081,21 +1102,35 @@ def _current_params() -> LLMParams:
 def _render_model_picker() -> str | None:
     """The model selectbox, with the configured model selected.
 
-    The environment's model leads the option list, so a deployment that set
-    ``OPENAI_MODEL`` shows that model selected on first render — the picker edits
-    the *request*, it does not invent a configuration the deployment does not
-    have. Clearing the box is allowed (an empty picker means "provider default"),
-    which is why a placeholder exists rather than forcing a selection; the
-    cleared state is a committed ``None``, so it survives a view switch like any
-    other value.
+    The deployment's model leads the option list, so a user who set ``LLM_MODEL``
+    (or its ``OPENAI_MODEL`` alias) sees **their** model selected on first render
+    — the picker edits the *request*, it does not invent a configuration the
+    deployment does not have. The name comes from the gateway's resolver rather
+    than from a single variable, so it follows the whole chain
+    (``params.model`` → ``LLM_MODEL`` → ``OPENAI_MODEL`` → the provider default)
+    instead of one spelling of it.
+
+    A resolved model that is not one of the hardcoded :data:`DEFAULT_MODELS` is
+    still put in the option list, because it is what a request will actually
+    use: snapping the selection to a fixed row would show the user a model that
+    is not theirs. Clearing the box is allowed (an empty picker means "provider
+    default"), which is why a placeholder exists rather than forcing a selection;
+    the cleared state is a committed ``None``, so it survives a view switch like
+    any other value — and so does a selection, because the value is driven from
+    :data:`PARAMS_STATE_KEY` rather than from the widget's own key.
 
     Returns:
         The selected model, or ``None`` for the provider default.
     """
 
     options = list(DEFAULT_MODELS)
-    configured = _param_state().get("model")
-    index = options.index(configured) if configured and configured in options else None
+    configured = _configured_model()
+    if configured:
+        # The deployment's own model leads, so the picker shows what a request
+        # will use — including a name no hardcoded row carries.
+        options = [configured, *(m for m in options if m != configured)]
+    chosen = _param_state().get("model")
+    index = options.index(chosen) if chosen and chosen in options else None
     return st.selectbox(
         "Model",
         options,
