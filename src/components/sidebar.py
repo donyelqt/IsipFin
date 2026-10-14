@@ -212,6 +212,7 @@ DEFAULT_MODELS: tuple[str, ...] = (
     "gpt-4.1-mini",
     "llama3.1",
     "qwen2.5",
+    # just a placeholder and can be modified
 )
 
 #: ``temperature`` bounds. Synthesis is user-adjustable
