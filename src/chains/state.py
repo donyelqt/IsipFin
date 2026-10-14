@@ -55,7 +55,64 @@ __all__ = [
     "Turn",
     "final_envelope",
     "replace_event",
+    "section_paths",
 ]
+
+#: The separator one flattened catalog section path is written with, on disk in
+#: ``docs.jsonl`` (``scripts/build_index.py:sections_of``) and in every rendered catalog.
+#: Every write site of the shape lives in ``scripts/``, which is outside mypy's declared
+#: scope, so the literal cannot be imported from there without a cross-tree dependency:
+#: it is declared once here and the three construction sites call this module's helper
+#: rather than each spelling their own split.
+SECTION_PATH_SEPARATOR = " > "
+
+
+def section_paths(value: Any) -> tuple[tuple[str, ...], ...]:
+    """Any section listing as ``DocSummary.sections``: one path of heading levels each.
+
+    ``data/index/docs.jsonl`` stores ``sections`` as a flat list of ``"A > B > C"`` strings
+    (the form ``scripts/build_index.py:sections_of`` flattens to), while every consumer of
+    :class:`DocSummary` treats an element as a *path* — ``refuse`` reads ``path[0]`` as the
+    first heading level and joins ``" > ".join(path)``. Building the summary directly from
+    the on-disk list produces a flat ``list[str]``, and ``path[0]`` on a string indexes a
+    character: a ``topic`` refusal then renders the first letter of a heading as the subject
+    the documents cover.
+
+    This is the single conversion every construction site calls, so the flat shape cannot
+    be built again by the next caller: the form that must not exist is never accepted as
+    input in the first place. Tolerant by shape (``"A"``, ``["A > B"]``, ``[("A", "B")]``
+    and ``None`` all yield paths) and lossless for anything that is not a listing — a
+    non-listing value yields ``()``, which is the honest "no sections recorded" value the
+    nodes already render, rather than a crash or a guessed path.
+
+    Returns:
+        A tuple of paths, each path a tuple of stripped heading levels, in the order given.
+        A blank listing entry is dropped, so ``"  "`` contributes no path.
+    """
+
+    if value is None:
+        return ()
+    items: list[Any]
+    if isinstance(value, str):
+        # One path, not one listing: a single ``"A > B"`` is the whole path.
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return ()
+    paths: list[tuple[str, ...]] = []
+    for item in items:
+        if isinstance(item, str):
+            levels = tuple(level.strip() for level in item.split(SECTION_PATH_SEPARATOR))
+        elif isinstance(item, (list, tuple)):
+            levels = tuple(str(level).strip() for level in item)
+        else:
+            continue
+        levels = tuple(level for level in levels if level)
+        if levels:
+            paths.append(levels)
+    return tuple(paths)
+
 
 #: The state schema (docs/ARCHITECTURE.md §State Schema) follows the code block on that
 #: section verbatim: same field names, same order, same ``total=False`` semantics.
@@ -151,6 +208,13 @@ class DocSummary:
     what makes an out-of-scope classification decidable *before* any retrieval call
     (ADR-001: "out_of_scope skips retrieval entirely — no LLM call"). ``page_count``
     is carried for the debug panel, not for routing.
+
+    ``sections`` is **a path per element** — a tuple of heading levels, outermost first.
+    ``data/index/docs.jsonl`` stores the same listing as flat ``"A > B > C"`` strings, so
+    every construction site converts through :func:`section_paths`: ``refuse`` reads
+    ``path[0]`` as the first level, and on a flat string that reads a *character*, which is
+    how a ``topic`` refusal came to name ``"i"`` as a subject the documents cover. Build one
+    only through that helper.
     """
 
     doc_id: str
@@ -245,6 +309,12 @@ class AnswerEnvelope:
     criterion 7). An error path never yields this object at all, because ``invoke()``
     re-raises and the UI renders a banner (ADR-007's hard rule: no code path renders an
     empty answer).
+
+    ``planner_degraded`` is the one field that marks a *failed* refusal rather than a
+    reasoned one, so a degraded turn is never indistinguishable from a scope decision.
+    It defaults to ``False`` — the store does not persist it, so a stored answer can
+    never claim a degradation the row never recorded; see the note in
+    :func:`final_envelope`.
     """
 
     answer_md: str
@@ -254,6 +324,8 @@ class AnswerEnvelope:
     plan: QueryPlan
     retrieval_debug: list[ScoredChunk]
     node_trace: list[NodeEvent]
+    #: ``True`` when the refusal was a planner failure degraded, not a decision.
+    planner_degraded: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Shallow-encode this envelope as plain JSON-able types.
@@ -291,6 +363,22 @@ def final_envelope(state: GraphState) -> AnswerEnvelope:
 
     ``refusal_reason`` is ``None`` unless a node set it, so "answered" and "refused"
     stay distinguishable: a refusal is a decision, not the absence of one.
+
+    ``planner_degraded`` carries ``analyze_question``'s marker onto the envelope. It is
+    the only thing that separates a refusal the planner *chose* from an
+    ``out_of_scope`` it *landed in* because the planner call failed (ADR-005), so
+    dropping it here would make a 429 look exactly like a reasoned scope decision —
+    which is what this fix closes. The flag is read straight from the state and is
+    ``False`` for every answer that never set it, so a normal answer is unchanged.
+
+    **Persistence gap (deliberate, tracked):** the store has no column for it, so
+    ``planner_degraded`` is *live-only*. ``app.py``'s ``_record`` /
+    ``store.record_message`` write only the seven persisted fields, so a historical
+    answer read back from the store reports ``False`` and the panel renders the
+    not-recorded voice rather than a degradation claim. Closing that needs a new
+    ``messages.planner_degraded`` column plus a ``record_message`` parameter and the
+    ``_record`` call site — ``app.py`` is owned separately, hence the gap stays visible
+    instead of silently assumed to work.
     """
 
     plan = state.get("query_plan") or QueryPlan(kind="", sub_queries=[], required_sections=[])
@@ -305,4 +393,5 @@ def final_envelope(state: GraphState) -> AnswerEnvelope:
         plan=plan,
         retrieval_debug=retrieval,
         node_trace=trace,
+        planner_degraded=bool(state.get("planner_degraded")),
     )

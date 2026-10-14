@@ -53,12 +53,22 @@ Exit codes, printed with their meaning on every run:
 
 =====  ==========================================================================
 0      every meaningful metric met its bar
-1      a golden regression: a pass bar was missed, the wrong-year canary fired, or
-       a case's graph run raised
+1      a golden regression: a pass bar was missed, the wrong-year canary fired,
+       a case's graph run raised, or a case's planner could not run at all
 2      a harness error: the dataset could not be run (no usable case, an unreadable
        file, an unresolvable ``follow_up_of``, a follow-up whose ancestor never ran,
        or a missing index)
 =====  ==========================================================================
+
+A case whose planner could not run — a 429, an auth failure, a context-length or a
+timeout refusal from the provider — is reported as **not measured** and excluded from its
+metrics, not scored as the ``out_of_scope`` refusal ADR-005's degradation produced. The
+reason: that refusal is what P1 emits when *no plan could be produced*
+(``missing_aspect=None`` plus ``planner_degraded=True``), so scoring it would read the
+provider's quota as a semantic verdict about the question, and as a wrong one — the
+degradation lands on in-scope and out-of-scope cases alike. The exclusion is recorded per
+case (``cases not measured``) and drives the exit code, so hiding a case behind it can
+never look like passing.
 
 Usage::
 
@@ -95,7 +105,8 @@ DEFAULT_INDEX_DIR = Path(os.environ.get("INDEX_DIR", "").strip() or (REPO_ROOT /
 CATALOG_NAME = "docs.jsonl"
 
 EXIT_PASS = 0
-#: A pass bar was missed, the wrong-year canary fired, or a case's graph run raised.
+#: A pass bar was missed, the wrong-year canary fired, a case's graph run raised, or a
+#: case's planner could not run at all.
 EXIT_REGRESSION = 1
 #: The dataset could not be run at all: a broken file, a broken reference, or no index.
 EXIT_HARNESS_ERROR = 2
@@ -114,8 +125,51 @@ HARD_METRICS = frozenset({"wrong_year_contamination"})
 
 #: How many fused children count as "top-5" for hit-rate (the metric's own name).
 HIT_RANK = 5
-#: Spaces are stripped when comparing figures, because the corpus prints "$ 211,915".
-_COMPACT_TRANSLATION = str.maketrans("", "", " \u00a0")
+#: Every space that carries no meaning around a printed figure. The corpus prints its
+#: tables with typographic spaces — a thin space (``U+2009``) between a value and its
+#: ``$``, three-per-em (``U+2004``) and figure space (``U+2007``) inside a row — and an
+#: answer following P4 rule 2 ("reproduce exactly as printed") prints the same number with
+#: a narrow no-break space (``U+202F``) after the currency symbol, which is what the keyed
+#: run actually produced. A difference of spacing is never a difference of number, so none
+#: of it may decide whether a figure is present. A line break is deliberately *not* here:
+#: a printed figure never spans lines, and a match that crosses one is a false match.
+_FIGURE_SPACES = " \u00a0\u2009\u200a\u2002\u2003\u2004\u2005\u2007\u202f\u205f\u3000"
+
+#: The rendering furniture dropped from both sides of a comparison: the spaces above,
+#: markdown emphasis (``**`` bold, ``*`` italic — an asterisk is never a digit of a
+#: figure), a thousands separator, the currency symbol, and the percent marker. Every one
+#: of them is a unit or a typographic convention marked on the number, never a digit of
+#: it, so ``$ 211,915``, ``**$211,915**`` and ``211915`` reduce to the same string.
+_FIGURE_FURNITURE = _FIGURE_SPACES + "*,$%"
+
+_SPACE_TRANSLATION = str.maketrans("", "", _FIGURE_SPACES)
+_FIGURE_TRANSLATION = str.maketrans("", "", _FIGURE_FURNITURE)
+
+#: The separators that glue two digit *groups* of one printed number: the comma, and the
+#: typographic spaces the corpus groups its values with (a thin space in ``211 915``). A
+#: plain space and a line break are deliberately absent — in a table row they separate
+#: *fields*, not digits (``17 $ 4,600 $ 5,270`` prints three figures), so gluing on them
+#! would merge a row's neighbouring numbers into one token and hide the figure the
+#: wrong-year canary is looking for.
+_GROUP_SEPARATORS = ",\u2009\u200a\u2002\u2003\u2004\u2005\u2007\u202f\u205f"
+
+#: One printed number inside a text: an optional currency sign, the spacing a sign may
+#: carry on either side, then the digit groups in the corpus's own discipline —
+#: ``\d{1,3}`` then any number of well-formed three-digit groups — and an optional decimal.
+#: The strictness is the whole point: ``$21,19,15`` is not a grouping of any real figure, so
+#: it tokenises to the three separate numbers ``21``, ``19`` and ``15`` rather than to
+#! ``211915``. Reading a number token-wise — rather than as a substring of space-stripped
+#: text — is what keeps a normalised ``198270`` from matching inside ``$1,198,270``: that
+#: is one printed number, so it yields the single token ``1198270``.
+_FIGURE_TOKEN_IN_TEXT = re.compile(
+    r"\$?[" + _FIGURE_SPACES + r"]*"
+    r"(?:\d{1,3}(?:[" + _GROUP_SEPARATORS + r"]\d{3})+|\d+)(?:\.\d+)?"
+)
+
+#: A normalised figure made of nothing but digits and decimal points — the shape that is
+#: compared token-wise. A ``must_appear`` carrying letters (``Intelligent Cloud``) reduces
+#: to a string this never matches, so it keeps the literal reading above.
+_DIGIT_FIGURE = re.compile(r"[\d.]+")
 #: A sentence carrying an adjacent-year figure is a *comparison* when it names that year or
 #: uses comparative language. Both readings are the answer being right about both years,
 #: not the year trap.
@@ -151,6 +205,31 @@ TRIM_MARKER = "(unsupported claim removed)"
 #: wrong-year claim the verifier caught and trimmed never reaches the final answer, so a
 #: canary that reads only ``answer_md`` scores it as clean.
 VERIFY_LOGGER_NAME = "src.chains.nodes.verify"
+
+#: The planner's logger. It is where a degraded plan is named — the ``planner_degraded``
+#: warning P1's failure handling emits (``analyze.py:_degraded_plan``) — which is the signal
+#: that this run's refusal describes the *gateway*, not the question.
+ANALYZE_LOGGER_NAME = "src.chains.nodes.analyze"
+
+#: The planner-degraded warning's own marker, matched verbatim so the signal is read only
+#: from the record the node emits and never inferred from a message that happens to look
+#: similar. The formatted record also carries the reason, which starts with the error class
+#: (``RateLimited: …``, ``SchemaViolationError: …``, ``Auth: …``) — the part that says *why*
+#: the planner degraded, and the part :func:`_infrastructure_degradation` reads.
+PLANNER_DEGRADED_MARKER = "planner_degraded:"
+
+#: Error-class prefixes that name an *infrastructure* condition rather than a semantic answer
+#: to the question. A planner that degraded because a 429, an auth failure or a transport
+#: error stopped it has said "I could not plan", which is not the same statement as P1's
+#: reasoned ``out_of_scope`` + ``missing_aspect`` and must not be scored as one.
+_INFRASTRUCTURE_REASONS = frozenset(
+    {
+        "RateLimited",
+        "ContextLength",
+        "Auth",
+        "Timeout",
+    }
+)
 
 #: How a dollar figure or a percentage is printed, used to tell "this text asserts a
 #: figure" from "this text merely mentions a year" — a year is not a figure, and an answer
@@ -447,12 +526,27 @@ class CaseResult:
     pretrim_claims: list[str] = field(default_factory=list)
     #: How those claim texts were obtained, so the report can say what it measured.
     pretrim_note: str = ""
+    #: The reason ``analyze_question``'s ``planner_degraded`` warning carried, or ``""`` when
+    #: the planner did not degrade. Populated from the same capture-wrap as
+    #: ``pretrim_claims``, so the refusal the run produced can be told apart from the one the
+    #: question earned: a degraded plan is an infrastructure fact, not a semantic verdict.
+    degraded_reason: str = ""
     refusal_ok: bool | None = None
     refusal_observed: bool | None = None
     refusal_detail: str = ""
     plan_ok: bool | None = None
     plan_detail: str = ""
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def infrastructure_degraded(self) -> bool:
+        """Whether this case never got a verdict because the planner could not run.
+
+        Not a failure and not a pass: the case was *unmeasured*, so it is reported as its
+        own category rather than folded into a rate in either direction.
+        """
+
+        return _infrastructure_degradation(self.degraded_reason)
 
     @property
     def failed(self) -> bool:
@@ -473,15 +567,79 @@ class CaseResult:
 def _compact(text: str) -> str:
     """Text without spaces, so the corpus's ``$ 211,915`` matches ``$211,915``."""
 
-    return text.translate(_COMPACT_TRANSLATION)
+    return text.translate(_SPACE_TRANSLATION)
+
+
+def _figure_key(text: str) -> str:
+    """A printed figure reduced to the digits that carry its value.
+
+    Four classes of difference between two spellings of the same figure are dropped, and
+    only four:
+
+    * **whitespace** — every space in :data:`_FIGURE_SPACES`. The corpus prints
+      ``$ 211,915`` and ``$\\u2009211,915``; an answer following P4 rule 2 prints the same
+      digits with a narrow no-break space, or bold around them, or a thin space before the
+      unit. Spacing is typography, never value.
+    * **markdown emphasis** — ``**`` bold and ``*`` italic. An asterisk is never a digit.
+    * **grouping and currency furniture** — the thousands separator and the ``$``. The
+      golden set names figures in the corpus's own form (``$211,915``) while a model is
+      free to print the same number bare or with different grouping.
+    * **the percent marker** — a rate's unit sign, never a digit of the rate.
+
+    What is *kept* is what makes the comparison a figure check rather than "any number
+    matches": the digit string itself, in its printed order, and every decimal point. So
+    ``211,915`` stays ``211915`` and ``9.68`` stays ``9.68``, while ``$198,270`` and
+    ``$211,915`` stay two different keys — which is what the wrong-year canary is built on,
+    and what keeps a genuinely absent figure MISSING.
+    """
+
+    return text.translate(_FIGURE_TRANSLATION)
+
+
+#: Comparison over a set, built once per answer rather than once per expectation: a case
+#: with two expected figures scans the text's numbers once, not twice.
+def _figure_tokens(text: str) -> frozenset[str]:
+    """Every number printed in ``text`` as its normalised key, as a set.
+
+    Built once per answer rather than once per expectation, so a case naming two expected
+    figures scans the answer's numbers once.
+    """
+
+    return frozenset(_figure_key(match.group(0)) for match in _FIGURE_TOKEN_IN_TEXT.finditer(text))
 
 
 def _contains_figure(text: str, figure: str) -> bool:
-    """Whether ``figure`` appears in ``text`` in either spacing."""
+    """Whether ``figure`` appears in ``text``, in any spelling of the same number.
+
+    Two readings, and the second is the one the measured run needed:
+
+    * the **literal** form is tried first, so a verbatim match never depends on the
+      normalisation being right and a non-numeric expectation (a segment name such as
+      ``Intelligent Cloud``) keeps exactly the reading it always had;
+    * then the **normalised** form: both sides are reduced by :func:`_figure_key` and the
+      expected key is looked up among the numbers the text actually prints.
+
+    The second reading is token-wise rather than a substring test over space-stripped
+    text, which is what makes it safe. ``**$ 211,915 million**`` and ``$ 211,915``
+    (narrow no-break space after the symbol, thin space before the unit, bold around the
+    whole figure) both match ``$211,915`` — and ``$1,198,270`` does *not* match
+    ``$198,270``, because that is one printed number, so it yields the token ``1198270``.
+
+    An empty ``figure`` is never present in anything. What stays *absent* under both
+    readings is what a genuinely missing answer prints: no number in it reduces to the
+    expected one, so it is reported MISSING exactly as before.
+    """
 
     if not figure:
         return False
-    return figure in text or _compact(figure) in _compact(text)
+    if figure in text:
+        return True
+    key = _figure_key(figure)
+    # A non-numeric expectation — a segment name — has no key to look up. It either matched
+    # literally above or it is absent; dropping furniture from letters would invent matches.
+    if not key or not _DIGIT_FIGURE.fullmatch(key):
+        return False
+    return key in _figure_tokens(text)
 
 
 #: One markdown table row: a line that opens and closes with a pipe (``| a | b |``). A row
@@ -643,29 +801,45 @@ def _states_figure(text: str) -> bool:
 
 
 @contextmanager
-def _capturing_pretrim_claims() -> Iterator[list[str]]:
-    """Capture the claim text the verifier writes *before* it trims a claim away.
+def _capturing_node_signals() -> Iterator[dict[str, Any]]:
+    """Read what the nodes logged during one ``invoke()``: two signals, two loggers.
 
-    The verify node logs every claim its deterministic pre-pass rejects, as the claim's own
-    text, before :func:`trim_answer` removes it from ``answer_md``. That logged text is the
-    claim the pipeline produced — and it is therefore the text the canary has to judge: a
-    wrong-year claim caught and trimmed never reaches the final answer, so a canary reading
+    The first is the claim text the verifier writes *before* it trims a claim away. The
+    verify node logs every claim its deterministic pre-pass rejects, as the claim's own text,
+    before ``trim_answer`` removes it from ``answer_md``. That logged text is the claim the
+    pipeline produced — and it is therefore the text the canary has to judge: a wrong-year
+    claim the verifier caught and trimmed never reaches the final answer, so a canary reading
     only ``answer_md`` scores the pipeline's best defence as a clean bill of health.
 
-    The capture is a handler on the verifier's logger, installed for the duration of one
-    ``invoke()`` call. Nothing is inferred from ``answer_md`` afterwards; the claims are
-    read from what the node actually emitted, so a silent verifier leaves the list empty and
-    the canary says it could not check rather than pretending it did.
+    The second is the planner's degradation reason. ``analyze_question`` logs one warning
+    when a plan could not be produced, and that reason starts with the mapped error's class
+    name — which is what separates "the gateway said no" from "the model answered". Both are
+    read off the loggers' own records rather than inferred from the answer text, so a silent
+    node leaves its bucket empty and the report says so rather than guessing. The handler is
+    removed from every logger in ``finally``, so a run that raises leaves nothing installed.
     """
 
     claims: list[str] = []
+    degradations: list[str] = []
 
     class _Capture(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            # ``record.msg`` is the format template the node logged with —
-            # ``"%s pre-pass trimmed %d claim(s): %s"`` — not the interpolated text, so the
-            # record is identified by it and its arguments read positionally: the node
-            # name, the count, then the claim list.
+            if record.name == ANALYZE_LOGGER_NAME:
+                # ``analyze.py:_degraded_plan`` logs ``"planner_degraded: %s; classifying
+                # out_of_scope with no missing_aspect (question=%r)"`` — matched on the prefix
+                # rather than the whole template, because the reason is the first argument.
+                if PLANNER_DEGRADED_MARKER not in str(record.msg):
+                    return
+                if not isinstance(record.args, tuple) or not record.args:
+                    return
+                if not isinstance(record.args[0], str):
+                    return
+                degradations.append(record.args[0])
+                return
+            # Otherwise the verifier's logger. ``record.msg`` is the format template the
+            # node logged with — ``"%s pre-pass trimmed %d claim(s): %s"`` — not the
+            # interpolated text, so the record is identified by it and its arguments read
+            # positionally: the node name, the count, then the claim list.
             if "pre-pass trimmed" not in str(record.msg) or not isinstance(record.args, tuple):
                 return
             if len(record.args) != 3 or not isinstance(record.args[2], list):
@@ -676,13 +850,30 @@ def _capturing_pretrim_claims() -> Iterator[list[str]]:
                 elif isinstance(entry, str):
                     claims.append(entry)
 
-    logger = logging.getLogger(VERIFY_LOGGER_NAME)
+    installed = [logging.getLogger(name) for name in (VERIFY_LOGGER_NAME, ANALYZE_LOGGER_NAME)]
     handler = _Capture(level=logging.WARNING)
-    logger.addHandler(handler)
+    for logger in installed:
+        logger.addHandler(handler)
     try:
-        yield claims
+        yield {"claims": claims, "degraded": degradations}
     finally:
-        logger.removeHandler(handler)
+        for logger in installed:
+            logger.removeHandler(handler)
+
+
+def _infrastructure_degradation(reason: str) -> bool:
+    """Whether the planner degraded for an infrastructure reason rather than a model verdict.
+
+    The reason is the text ``analyze_question``'s ``planner_degraded`` warning carries, which
+    begins with the mapped error's class name (ADR-007's gateway taxonomy). A ``RateLimited``,
+    ``Auth``, ``ContextLength`` or ``Timeout`` names a provider condition: the planner was
+    never reached, or was reached and never answered. That is the opposite of a schema
+    violation, where the model *did* answer and its answer was unusable — P1's failure
+    handling treats the latter as "no plan", and the harness treats the former as
+    "no measurement", because nothing about the question was decided.
+    """
+
+    return reason.strip().split(":", 1)[0].strip() in _INFRASTRUCTURE_REASONS
 
 
 def _texts_to_check(result: CaseResult) -> tuple[list[str], str]:
@@ -779,6 +970,11 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
     expect = case.expect
     answer = result.answer_md
 
+    # Did the planner run at all? When it could not, this run's ``out_of_scope`` is P1's
+    # no-plan output rather than a classification of the question, and the metrics that read
+    # the answer have nothing to read.
+    infrastructure = _infrastructure_degradation(result.degraded_reason)
+
     # --- retrieval hit-rate@5: is the expected figure inside the fused top-5's text? ---
     markers = [str(m) for m in expect.get("chunk_markers", []) or [] if str(m).strip()]
     if not markers:
@@ -800,7 +996,13 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
             result.retrieval_hit = None  # observed, printed, not scored
 
     # --- citation presence: every factual answer carries >= 1 valid marker ------------
-    if not case.wants_citation:
+    if infrastructure:
+        # No plan, so no retrieval, so no answer to carry a marker. Observed, not scored.
+        result.citation_observed = bool(result.citations) and all(
+            _valid_citation(entry) for entry in result.citations
+        )
+        result.citation_ok = None
+    elif not case.wants_citation:
         result.citation_ok = None
         result.citation_observed = None
         result.notes.append("citations are not expected for this case")
@@ -829,6 +1031,12 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
         result.notes.append(
             "no expected figure for this case (summarization); figure match not scored"
         )
+    elif infrastructure:
+        # The graph routed to ``refuse`` before retrieval, so the figure was never reachable
+        # from the answer: an absent figure here measures the quota, not the pipeline.
+        result.missing_figures = list(expected_figures)
+        result.figure_observed = False
+        result.figure_ok = None
     elif not scopes["figure_match"].covers(case):
         result.missing_figures = [
             figure for figure in expected_figures if not _contains_figure(answer, figure)
@@ -874,6 +1082,19 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
             result.pretrim_note = f"answer contained no figure (judged {source})"
 
     # --- refusal correctness: out-of-scope refused, in-scope answered ----------------
+    if infrastructure:
+        # The planner never decided anything: a 429, an auth failure or a transport error
+        # stopped it, so ``out_of_scope`` here is the plan P1 emits when *no* plan could be
+        # produced (``missing_aspect=None``, ``planner_degraded=True``), not a classification
+        # of the question. Scoring it as one would read a quota exhaustion as a semantic
+        # verdict — and as a wrong one, because the degradation lands on every class of case.
+        # The refusal itself still stands as an observation: it is recorded, printed, and
+        # never folded into a rate. This is the same ``not_checkable`` treatment the canary
+        # gives an answer carrying no figure — "we could not look", never "nothing was wrong".
+        result.notes.append(
+            "the planner could not run (infrastructure), so the refusal carries no verdict "
+            f"about this question: {result.degraded_reason}"
+        )
     if case.is_refusal:
         wanted = str(expect.get("missing_aspect", "")).strip()
         got = (result.refusal_reason or "").strip()
@@ -901,6 +1122,9 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
             result.notes.append(
                 f"refusal correctness not measurable: {scopes['refusal_correctness'].reason}"
             )
+    elif infrastructure:
+        # Observed above and reported below, but excluded from the rate: nothing decided it.
+        result.refusal_ok = None
 
     # --- routing check (not one of the doc's five metrics) ------------------------------
     # The doc pairs the comparison question with the decomposition path, so a case may name
@@ -1036,12 +1260,13 @@ def _run_case(
     started = time.perf_counter()
     try:
         # The capture wraps the graph run, not the scoring: the claim text the verifier
-        # logs is emitted while the node runs, and the canary needs it verbatim.
-        with _capturing_pretrim_claims() as captured:
+        # logs, and the reason the planner degraded, are both emitted while the nodes run.
+        with _capturing_node_signals() as captured:
             envelope = invoke(
                 case.question, history=history or None, params=None, doc_catalog=ctx.docs
             )
-        result.pretrim_claims = list(captured)
+        result.pretrim_claims = list(captured["claims"])
+        result.degraded_reason = captured["degraded"][0] if captured["degraded"] else ""
     except Exception as exc:
         # A broad catch is deliberate: a graph run can fail through ADR-007's typed-error
         # taxonomy, through langgraph's own wrapper around a node failure, or through a
@@ -1103,6 +1328,11 @@ def _print_case(result: CaseResult, position: int, total: int) -> None:
         return
 
     print(f"  plan.kind      : {result.plan_kind!r} -> route {result.route!r}")
+    if _infrastructure_degradation(result.degraded_reason):
+        # The plan that arrived is P1's no-plan output. Say so above the routing line, or a
+        # reader takes ``out_of_scope`` for the class this question earned.
+        print("  planner        : DEGRADED (no plan was produced — the gateway did not answer);")
+        print(f"                   {result.degraded_reason}")
     if result.plan_ok is not None:
         state = "OK" if result.plan_ok else "MISMATCH"
         print(f"  routing check  : {state} — {result.plan_detail}")
@@ -1297,6 +1527,10 @@ def _exit_code(results: Sequence[CaseResult], verdicts: Mapping[str, str]) -> tu
     exit code: a reader who scored the same metric would see it unmeasured. The exit code
     is read from these verdict strings rather than recomputed from the case values, so
     this filter is the one place the ``NA``/``FAIL`` distinction has to hold.
+
+    An infrastructure-degraded case is a *second* way to be unmeasured, and one the verdict
+    map cannot see: its metrics are excluded by the scorer, so it appears nowhere in the
+    table. It still drives the exit code, so excluding a case can never turn into passing.
     """
 
     broken = [r for r in results if r.error_kind == "dataset"]
@@ -1304,12 +1538,22 @@ def _exit_code(results: Sequence[CaseResult], verdicts: Mapping[str, str]) -> tu
         return EXIT_HARNESS_ERROR, "; ".join(f"{r.case.case_id}: {r.error}" for r in broken)
     failed = [name for name, verdict in verdicts.items() if verdict == "FAIL"]
     crashed = [r for r in results if r.error_kind == "run"]
-    if failed or crashed:
+    # An infrastructure-degraded case is excluded from its metrics, which is what makes it
+    # invisible to ``_verdicts`` — so the exclusion itself would read as a pass if the run
+    # paid no price for it. A run that measured nothing because the model never answered is
+    # a regression, named as one rather than left to masquerade as ``NA``.
+    unmeasured = [r for r in results if r.infrastructure_degraded]
+    if failed or crashed or unmeasured:
         parts = []
         if failed:
             parts.append("metrics missed their bar: " + ", ".join(failed))
         if crashed:
             parts.append("cases raised in the graph: " + ", ".join(r.case.case_id for r in crashed))
+        if unmeasured:
+            parts.append(
+                "cases the planner could not run (infrastructure, not scored): "
+                + ", ".join(r.case.case_id for r in unmeasured)
+            )
         return EXIT_REGRESSION, "; ".join(parts)
     return EXIT_PASS, ""
 
@@ -1341,12 +1585,17 @@ def _print_summary(
 
     failing = [r.case.case_id for r in results if r.failed]
     broken = [r.case.case_id for r in results if r.error_kind == "dataset"]
+    unmeasured = [r.case.case_id for r in results if r.infrastructure_degraded]
     if failing:
         print(f"cases failing        : {', '.join(failing)}")
     elif broken:
         print("cases failing        : none (the failures are dataset errors, listed above)")
     else:
         print("cases failing        : none")
+    if unmeasured:
+        # Named separately from "failed" because it is not one: the planner could not run,
+        # so those cases carry no verdict at all rather than a bad one.
+        print(f"cases not measured   : {', '.join(unmeasured)} (planner could not run)")
     print()
 
     header = f"{'metric':<26}{'value':>18}  {'bar':>6}  verdict"
@@ -1388,7 +1637,7 @@ def _print_exit(code: int) -> None:
     meanings = {
         EXIT_PASS: "every meaningful metric met its bar",
         EXIT_REGRESSION: "a golden regression — a pass bar was missed, the wrong-year canary "
-        "fired, or a case's graph run raised",
+        "fired, a case's graph run raised, or a case's planner could not run at all",
         EXIT_HARNESS_ERROR: "a harness error — the dataset could not be run (no usable case, "
         "an unreadable file, an unresolvable follow_up_of, or a missing index)",
     }
@@ -1447,6 +1696,8 @@ def _json_report(
                     "pretrim_claims": list(r.pretrim_claims),
                     "refusal_ok": r.refusal_ok,
                     "refusal_detail": r.refusal_detail,
+                    "planner_degraded_reason": r.degraded_reason,
+                    "infrastructure_degraded": _infrastructure_degradation(r.degraded_reason),
                 },
                 "notes": r.notes,
                 "error": r.error,

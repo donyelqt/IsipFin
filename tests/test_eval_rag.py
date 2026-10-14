@@ -536,3 +536,460 @@ def test_no_metric_field_reads_a_missing_attribute() -> None:
         assert field in declared, f"{metric} reads undeclared field {field!r}"
     for metric, field in harness._OBSERVED_FIELD.items():
         assert field in declared, f"{metric} observes undeclared field {field!r}"
+
+
+# --- 5. an infrastructure-degraded case is not measured, not scored --------------------
+#
+# The shape a rate-limited run actually produces: ``analyze_question`` catches the
+# ``RateLimited`` the gateway raises and returns P1's no-plan output — ``kind=out_of_scope``,
+# ``missing_aspect=None``, ``planner_degraded=True`` — so the graph routes to ``refuse`` and
+# every case comes back refused. Scored as a semantic verdict, that refusal reads as a wrong
+# one on every in-scope case, which is what took ``refusal_correctness`` to 2/9 and
+# ``citation_presence`` to 1/7 on a run where the answer quality was never exercised at all.
+#
+# The harness has one job here: say the provider said no, and refuse to average over it.
+
+#: The reason ``analyze.py:_degraded_plan`` logs for a 429 — a class name, then the message.
+RATE_LIMITED_REASON = (
+    "RateLimited: model rate limited the request (Error code: 429 - "
+    "{'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` on tokens "
+    "per minute (TPM): Limit 8000, Used 6034, Requested 2511.', 'type': 'tokens'}})"
+)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        RATE_LIMITED_REASON,
+        "Auth: chat needs a key: none of LLM_API_KEY, OPENAI_API_KEY or GROQ_API_KEY is set",
+        "ContextLength: the prompt is too long for the model's context window",
+        "Timeout: the provider did not answer within the timeout",
+    ],
+)
+def test_a_planner_that_could_not_run_is_not_a_semantic_verdict(reason: str) -> None:
+    """Each infrastructure class says "no plan was produced", never what the question was.
+
+    A ``RateLimited``, ``Auth``, ``ContextLength`` or ``Timeout`` stops the gateway outside
+    the question's content. ``SchemaViolationError`` is deliberately *not* in that set: the
+    model answered and its answer was unusable, which is P1's failure handling, and a plan
+    the model produced is a plan the harness can score.
+    """
+
+    assert harness._infrastructure_degradation(reason) is True
+    assert (
+        harness._infrastructure_degradation(
+            "SchemaViolationError: model response did not match the requested schema"
+        )
+        is False
+    )
+    assert harness._infrastructure_degradation("") is False
+    assert harness._infrastructure_degradation("   ") is False
+
+
+def test_a_rate_limited_case_is_not_scored_as_a_refusal() -> None:
+    """The regression this section exists for: q02's degraded refusal scored ``False`.
+
+    Under the old scoring an in-scope question that was refused scored ``False`` because it
+    was refused — with nothing about the question having been decided. The planner-degraded
+    signal is what separates that from a real wrong refusal.
+    """
+
+    case = _case("degraded-figure", {"kind": "figure", "must_appear": ["$88,523"]})
+    result = harness.CaseResult(
+        case=case,
+        answer_md="**Refused** — I can't answer that: the question is outside the scope of "
+        "the documents in this session.",
+        refusal_reason="unspecified",
+        plan_kind="out_of_scope",
+        route="refuse",
+        degraded_reason=RATE_LIMITED_REASON,
+    )
+
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.infrastructure_degraded is True
+    assert result.refusal_ok is None, "the answer to 'was this refusal right?' is unknown"
+    assert result.citation_ok is None, "no retrieval ran, so there was no citation to score"
+    assert result.figure_ok is None, "no answer was produced, so there was no figure to match"
+    assert result.missing_figures == ["$88,523"], "still observed: the figure is absent"
+    assert result.refusal_observed is False, "what it saw is recorded, not hidden"
+    assert any("could not run" in note for note in result.notes)
+
+
+def test_the_same_case_without_the_degradation_signal_still_scores() -> None:
+    """The exclusion is narrow: only the degradation signal takes a case out of the rate.
+
+    A genuinely refused in-scope question — a planner that ran and said ``out_of_scope`` —
+    still scores ``False``, which is the metric doing its job. The fix labels an
+    infrastructure case; it does not become a blanket exemption.
+    """
+
+    case = _case("real-refusal", {"kind": "figure", "must_appear": ["$88,523"]})
+    result = harness.CaseResult(
+        case=case,
+        answer_md="**Refused** — outside the scope of the documents in this session.",
+        refusal_reason="unspecified",
+        plan_kind="out_of_scope",
+        degraded_reason="",
+    )
+
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.refusal_ok is False
+    assert result.figure_ok is False
+    assert result.citation_ok is False
+    assert result.infrastructure_degraded is False
+
+
+def test_a_degraded_refusal_case_keeps_its_real_missing_aspect_check() -> None:
+    """A degradation is no licence for a wrong ``missing_aspect`` either.
+
+    q10 is a refusal case whose plan degradation still lands it on ``refuse``: the harness
+    records what the pipeline said about which aspect was missing, and says it could not
+    verify it, rather than quietly passing or failing.
+    """
+
+    case = _case("degraded-refusal", {"kind": "refusal", "missing_aspect": "entity"})
+    result = harness.CaseResult(
+        case=case,
+        answer_md="**Refused** — outside the scope of the documents in this session.",
+        refusal_reason="unspecified",
+        plan_kind="out_of_scope",
+        degraded_reason=RATE_LIMITED_REASON,
+    )
+
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.refusal_ok is None
+    assert result.refusal_observed is False, "'unspecified' where 'entity' was expected"
+    assert result.refusal_detail.startswith("refused, but missing_aspect")
+    assert result.citation_ok is None, "a refusal is never expected to cite"
+
+
+def test_the_golden_set_shape_does_not_read_a_degradation_as_a_failure() -> None:
+    """The whole q01-q08 + q10 shape: nine unmeasured cases, one honest refusal.
+
+    This is the aggregate a rate-limited run produces after the fix. Nothing scores a
+    ``False``, because nothing was measured — and the run still does not pass, because
+    nine cases carrying no verdict is a regression about the run, not a quality result.
+    """
+
+    figures = {
+        "q01": "$211,915",
+        "q02": "$88,523",
+        "q03": "$211,915",
+        "q04": "$72,361",
+        "q05": "Intelligent Cloud",
+        "q06": "",
+        "q07": "$88,523",
+        "q08": "Intelligent Cloud",
+    }
+    results = []
+    for case_id, must in figures.items():
+        case = _case(case_id, {"kind": "figure", "must_appear": [must] if must else []})
+        results.append(
+            harness.CaseResult(
+                case=case,
+                answer_md="**Refused** — outside the scope of the documents.",
+                refusal_reason="unspecified",
+                plan_kind="out_of_scope",
+                degraded_reason=RATE_LIMITED_REASON,
+            )
+        )
+    # q09 is the one real refusal: FY2019, never reaching the planner at all (ADR-010's
+    # fiscal-year gate), so it scores normally.
+    gated = _case("q09", {"kind": "refusal", "missing_aspect": "time_period"})
+    results.append(
+        harness.CaseResult(
+            case=gated,
+            answer_md="**Refused** — the documents cover fiscal years FY2021-FY2023.",
+            refusal_reason="time_period",
+            plan_kind="out_of_scope",
+            degraded_reason="",
+        )
+    )
+    degraded_entity = _case("q10", {"kind": "refusal", "missing_aspect": "entity"})
+    results.append(
+        harness.CaseResult(
+            case=degraded_entity,
+            answer_md="**Refused** — outside the scope of the documents.",
+            refusal_reason="unspecified",
+            plan_kind="out_of_scope",
+            degraded_reason=RATE_LIMITED_REASON,
+        )
+    )
+
+    for result in results:
+        harness._score_case(result.case, result, harness._full_scopes())
+    verdicts = harness._verdicts(results)
+
+    assert not [r for r in results if r.failed], "no case failed a check"
+    assert verdicts["refusal_correctness"] == "PASS", "q09 is the only measurable refusal"
+    assert harness._metric_value("refusal_correctness", results) == "1/1 (1.00)"
+    # Excluded from every rate, and still a regression: the exclusion cannot become a pass.
+    for metric in ("citation_presence", "figure_match", "retrieval_hit_rate@5"):
+        assert verdicts[metric] == "NA", metric
+    code, reason = harness._exit_code(results, verdicts)
+    assert code == harness.EXIT_REGRESSION
+    assert "planner could not run" in reason
+    assert "q01" in reason
+
+
+def test_the_summary_names_the_unmeasured_cases_apart_from_the_failing_ones(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two different labels: "failing" is a bad answer, "not measured" is no verdict."""
+
+    failing = _result("bad", refusal_ok=False)
+    unmeasured = _result("gated-out", degraded_reason=RATE_LIMITED_REASON)
+    results = [failing, unmeasured]
+    ctx = harness._RunContext(
+        docs=[],
+        mock_mode=False,
+        index_dir=Path("unused"),
+        scopes=harness._full_scopes(),
+    )
+    report = harness.DatasetReport(cases=[], malformed=[], duplicate_ids=[])
+
+    code = harness._print_summary(results, harness._verdicts(results), ctx, report, [])
+
+    printed = capsys.readouterr().out
+    assert "cases failing        : bad" in printed
+    assert "cases not measured   : gated-out (planner could not run)" in printed
+    assert code == harness.EXIT_REGRESSION
+
+
+# --- 6. figure match compares figures, not their orthography --------------------------
+#
+# The shape a keyed run against ``openai/gpt-oss-20b`` actually produced for q01 ("What was
+# Microsoft's revenue in FY2023?"), verbatim from that run's journal:
+#
+#     expected       : $211,915
+#     expected       : $211,915       MISSING
+#     retrieval hit  : True (expected figure present in the fused top-5 texts)
+#     answer         : Microsoft's revenue for fiscal year 2023 was **$ 211,915 million** [2]
+#
+# Four cases scored that way, so ``figure_match`` printed 0/3 (0.00) FAIL while
+# ``citation_presence`` printed 4/4 (1.00) PASS on the *same* runs — answers that were
+# cited and correct reported as missing the figure they printed. The comparison was a
+# literal substring test of ``$211,915`` against the answer text, and P4 rule 2 tells the
+# model to reproduce the document's own spacing, so the corpus's ``$ 211,915`` (a space
+# after the symbol) is the answer the prompt contract asks for.
+#
+# The fix normalises spacing, emphasis, grouping and the currency sign — the orthography of
+# a number — and never the digits. That distinction is what the rest of this section pins:
+# the wrong-year figure must still be a different figure.
+
+#: The answer q01's run printed, with the log's own narrow no-break spaces (``U+202F``)
+#: after the symbol, before the unit and before the citation marker.
+LOG_ANSWER_Q01 = (
+    "Microsoft\u2019s revenue for fiscal year\u202f2023 was "
+    "**$\u202f211,915\u202fmillion**\u202f[2]"
+)
+#: The same answer as the ticket writes it: plain ASCII with a normal space.
+SPACED_ANSWER_Q01 = "Microsoft's revenue for fiscal year 2023 was **$ 211,915 million** [2]"
+#: The figure the corpus prints for FY2022 — the adjacent year the canary watches.
+FY2022_FIGURE = "$198,270"
+
+
+def test_the_logged_answer_matches_the_figure_it_prints() -> None:
+    """The exact regression: q01's own answer, scored against q01's own expectation."""
+
+    assert harness._contains_figure(LOG_ANSWER_Q01, "$211,915")
+    assert harness._contains_figure(SPACED_ANSWER_Q01, "$211,915")
+
+
+def test_the_figure_metric_scores_the_logged_answer_as_a_match() -> None:
+    """End to end through the scoring path, not just the helper: ``figure_ok`` is True."""
+
+    case = _case("q01", {"kind": "figure", "must_appear": ["$211,915"]})
+    result = harness.CaseResult(case=case, answer_md=LOG_ANSWER_Q01)
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.figure_ok is True
+    assert result.missing_figures == []
+
+
+def test_the_exact_answer_the_run_printed_reaches_the_pass_bar() -> None:
+    """The aggregate shape the run printed, with one of its three answers repaired.
+
+    q01 now scores a match while q02 and q04 still miss, so the metric reports 1/3 (0.33)
+    against a 0.95 floor and still reaches exit 1. The normalisation repairs the
+    comparison, not the run's other outcomes.
+    """
+
+    results = [
+        harness.CaseResult(
+            case=_case("q01", {"kind": "figure", "must_appear": ["$211,915"]}),
+            answer_md=LOG_ANSWER_Q01,
+        ),
+        harness.CaseResult(
+            case=_case("q02", {"kind": "figure", "must_appear": ["$88,523"]}),
+            answer_md="Operating income in fiscal year 2023 was $55,884 million [6].",
+        ),
+        harness.CaseResult(
+            case=_case("q04", {"kind": "figure", "must_appear": ["$72,361"]}),
+            answer_md="**Refused** — outside the scope of the documents.",
+        ),
+    ]
+    for result in results:
+        harness._score_case(result.case, result, harness._full_scopes())
+
+    assert harness._metric_value("figure_match", results) == "1/3 (0.33)"
+    assert harness._verdicts(results)["figure_match"] == "FAIL"
+    assert harness._exit_code(results, harness._verdicts(results))[0] == harness.EXIT_REGRESSION
+
+
+def test_an_absent_figure_is_still_missing() -> None:
+    """The check did not become vacuous: an answer without the figure still misses it."""
+
+    answer = "**Refused** — outside the scope of the documents in this session."
+    case = _case("q01", {"kind": "figure", "must_appear": ["$211,915"]})
+    result = harness.CaseResult(case=case, answer_md=answer)
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.figure_ok is False
+    assert result.missing_figures == ["$211,915"]
+    assert not harness._contains_figure(answer, "$211,915")
+
+
+def test_an_answer_printing_a_different_number_does_not_match() -> None:
+    """The same digits at another scale, regrouped, or in another arrangement."""
+
+    assert not harness._contains_figure("Revenue was $111,915 million in FY2023 [1].", "$211,915")
+    assert not harness._contains_figure("Revenue was $211.915 thousand.", "$211,915")
+    assert not harness._contains_figure("Revenue was $21,19,15 million.", "$211,915")
+    assert not harness._contains_figure("Revenue was about $212 billion.", "$211,915")
+
+
+def test_the_adjacent_year_figures_do_not_match() -> None:
+    """The distractors, which is what stops the normalisation from matching any number.
+
+    ``$198,270`` and ``$83,383`` sit next to the asked figures in the corpus's income
+    statement, so they are exactly what a loosened check would let through.
+    """
+
+    for answer in (
+        "Revenue was $198,270 million in FY2023 [1].",
+        "Operating income was $83,383 million in FY2023 [2].",
+        "| Operating income | $ 83,383 |",
+    ):
+        assert not harness._contains_figure(answer, "$211,915"), answer
+        assert not harness._contains_figure(answer, "$88,523"), answer
+
+
+def test_the_adjacent_year_figure_still_matches_when_it_is_the_expected_one() -> None:
+    """The transpose: a normalisation that swallowed the distractors would fail q03, whose
+    expected figures include the prior year's."""
+
+    assert harness._contains_figure(
+        "Revenue fell from $211,915 to $ 198,270 million [1].", "$198,270"
+    )
+
+
+def test_a_longer_number_containing_the_expected_one_does_not_match() -> None:
+    """One printed number is one token, so ``$1,198,270`` never reports ``$198,270``."""
+
+    assert not harness._contains_figure(
+        "The company earned $1,198,270 million in FY2023.", "$198,270"
+    )
+    assert not harness._contains_figure("The subtotal was $1198270.", "$211,915")
+
+
+def test_the_spacing_emphasis_and_grouping_variants_all_match() -> None:
+    """Every spelling of the same figure the corpus and a model may print between them."""
+
+    expected = "$211,915"
+    variants = (
+        "$211,915",  # the expectation's own form
+        "$ 211,915",  # the corpus's form: a space after the symbol
+        "$\u00a0211,915",  # no-break space
+        "$\u202f211,915",  # narrow no-break space — what the keyed run printed
+        "211,915",  # no currency sign
+        "211915",  # no currency sign, no separator
+        "**$ 211,915**",  # bold around the whole figure
+        "*$211,915*",  # italic
+        "\u20ac211,915",  # another currency's sign — the digits are the figure
+        "Revenue was **$ 211,915 million** [1].",  # a space before the unit
+        "| Revenue | $ 211,915 | $ 198,270 |",  # a table cell, distractor beside it
+        "Revenue grew to $ 211,915 million, up 7% [1].",  # another figure in the sentence
+    )
+    for variant in variants:
+        assert harness._contains_figure(variant, expected), variant
+
+
+def test_a_thin_space_between_the_digit_groups_is_the_same_figure() -> None:
+    """The corpus groups its values with a thin space, so ``211 915`` is ``211,915``."""
+
+    assert harness._contains_figure("Revenue was $ 211\u2009915 million.", "$211,915")
+    assert harness._contains_figure("Revenue was 211\u2007915 million.", "211,915")
+
+
+def test_a_figure_the_answer_never_prints_does_not_match() -> None:
+    """The literal-vs-normalised boundary: a number the answer does not print is absent,
+    whether it differs by one digit, by scale, or by being another year's figure."""
+
+    for absent in ("$212,915", "$211,915,000", "$1,119,150", "$198,270"):
+        assert not harness._contains_figure(LOG_ANSWER_Q01, absent), absent
+
+
+def test_a_non_numeric_expectation_keeps_its_literal_reading() -> None:
+    """q05 and q08 expect a segment name. Dropping furniture from letters would invent
+    matches no answer makes, so it keeps the substring reading it always had."""
+
+    assert harness._contains_figure(
+        "Intelligent Cloud drove revenue with $87,907 million [3].", "Intelligent Cloud"
+    )
+    assert not harness._contains_figure("The answer concerns Amazon.", "Intelligent Cloud")
+    assert not harness._contains_figure("Intelligent Cloud", "$87,907")
+
+
+def test_an_empty_expectation_is_never_present() -> None:
+    """The guard the caller relies on for ``must_appear`` entries that strip to nothing."""
+
+    assert not harness._contains_figure(LOG_ANSWER_Q01, "")
+    assert not harness._contains_figure(LOG_ANSWER_Q01, "   ")
+
+
+# --- 6a. the wrong-year canary reads the same inputs unchanged ------------------------
+
+
+def test_the_canary_verdict_is_unchanged_by_the_normalisation() -> None:
+    """The normalisation may not quieten the year-confusion canary.
+
+    Every shape here is the canary's own corpus: the preceding tests establish that
+    ``_contains_figure`` now matches across spacing and emphasis, and the same recognition
+    is what *finds* the adjacent-year figure for the canary to judge. None of these verdicts
+    may move — those that fired before must still fire, and those that were clean must
+    still be clean.
+    """
+
+    # The trap in prose: the asked year named beside the adjacent year's figure.
+    assert _canary_verdict("Revenue was $198,270 million in FY2023 [1].")
+    # The same trap in the log's own spacing: found as reliably now, if not more so.
+    assert _canary_verdict("Revenue was $ 198,270\u202fmillion in FY2023 [1].")
+    # A correct three-year table is still clean, and still clean for every column.
+    for figure in ("$211,915", "$198,270", "$168,088"):
+        assert not _canary_verdict(_THREE_YEAR_TABLE, figure=figure)
+    # The same table in the corpus's spacing is still clean.
+    spaced = (
+        "| Metric | FY2023 | FY2022 | FY2021 |\n"
+        "|---|---|---|---|\n"
+        "| Revenue | $ 211,915 | $ 198,270 | $ 168,088 |"
+    )
+    assert not _canary_verdict(spaced)
+    assert not _canary_verdict(spaced, figure="$198,270")
+    # A headerless row of the asked and adjacent figures, the pre-trim claim shape.
+    assert _canary_verdict("Revenue | $211,915 | $198,270")
+
+
+def test_the_canary_still_names_the_adjacent_year_it_found() -> None:
+    """The report still says *which* figure looked wrong, in the expectation's own form."""
+
+    case = _canary_case("canary-report")
+    result = harness.CaseResult(case=case, answer_md="Revenue was $198,270 million in FY2023 [1].")
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.wrong_year is True
+    assert FY2022_FIGURE in result.wrong_year_detail
+    assert result.wrong_year_state == harness.WRONG_YEAR_CONTAMINATED

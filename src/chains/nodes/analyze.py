@@ -71,7 +71,7 @@ from dataclasses import replace
 from typing import Any
 
 from src.chains.checks import asked_years, catalog_years, year_coverage_gap
-from src.chains.state import DocSummary, GraphState, QueryPlan
+from src.chains.state import DocSummary, GraphState, QueryPlan, section_paths
 from src.utils.llm import LLMError, LLMParams, SchemaViolationError, build_llm
 from src.utils.prompts import assert_min_version, node_meta
 from src.utils.tracing import TOKEN_KEY, trace_node
@@ -222,23 +222,38 @@ def _documents(state: GraphState) -> list[DocSummary]:
     ``invoke`` types ``doc_catalog`` as ``list[Any]`` at its own boundary, so an entry that
     is not a :class:`DocSummary` is dropped rather than raised on: a catalog the node cannot
     read plans the same way an empty one does, which is an honest plan rather than a crash.
+
+    A summary carrying the flat ``sections`` ``docs.jsonl`` stores is repaired through
+    :func:`~src.chains.state.section_paths` rather than tolerated as-is, so ``_section_text``
+    sees the path it is written to read and the shape never reaches the payload the planner
+    receives. Construction is where the shape is fixed; this keeps the reader honest about a
+    summary built anywhere else.
     """
 
     raw = state.get("doc_catalog")
     if isinstance(raw, str | bytes) or not isinstance(raw, (list, tuple)):
         return []
-    return [entry for entry in raw if isinstance(entry, DocSummary)]
+    return [_repaired(entry) for entry in raw if isinstance(entry, DocSummary)]
+
+
+def _repaired(doc: DocSummary) -> DocSummary:
+    """One catalog entry with ``sections`` resolved to its declared shape, paths of headings."""
+
+    if all(isinstance(path, tuple) for path in doc.sections):
+        return doc
+    return replace(doc, sections=section_paths(doc.sections))
 
 
 def _section_text(path: Any) -> str:
     """One section path as ``"A > B"``.
 
-    ``DocSummary.sections`` is typed ``tuple[tuple[str, ...], ...]`` and the ingest catalog
-    writes it that way (``scripts/build_index.py:sections_of``), but the path arrives through
-    a ``list[Any]`` boundary: a JSON row or a hand-built test summary can hand back a plain
-    string, and iterating a string yields characters — so ``"MD&A, Income Statements"`` would
-    be rendered one glyph per entry. A string is therefore taken as the whole path, and
-    anything else is joined from the entries it can read.
+    ``DocSummary.sections`` is typed ``tuple[tuple[str, ...], ...]`` and every construction
+    site now builds it that way through :func:`~src.chains.state.section_paths`, but the
+    path arrives through a ``list[Any]`` state boundary: a caller may still hand back a
+    plain string, and iterating a string yields characters — so ``"MD&A, Income Statements"``
+    would be rendered one glyph per entry. A string is therefore taken as the whole path,
+    and anything else is joined from the entries it can read. The tolerance is a reader's,
+    not a writer's: the writer's shape is the helper's.
     """
 
     if isinstance(path, str):
