@@ -50,11 +50,12 @@ the answer that must be rendered instead.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Sequence
 from typing import Any
 
-from src.chains.state import DocSummary, GraphState, QueryPlan
+from src.chains.state import DocSummary, GraphState, QueryPlan, section_paths
 from src.utils.tracing import trace_node
 
 __all__ = ["refuse"]
@@ -195,12 +196,33 @@ def _documents(state: GraphState) -> list[DocSummary]:
     keeps the envelope tolerant of a partially-populated state), so a wrongly-typed entry
     simply contributes no coverage instead of raising. A catalog the node cannot read is the
     empty catalog, which has its own honest refusal.
+
+    A summary whose ``sections`` is the *flat* list ``docs.jsonl`` stores is repaired rather
+    than dropped, through :func:`~src.chains.state.section_paths`: this node must never raise
+    (ADR-007), and dropping such an entry would trade a wrong refusal for an emptier one — the
+    flat shape would otherwise render ``path[0]`` as a single character, so the copy named
+    that character as a subject. The repair reads the invariant back off the type
+    (:class:`DocSummary` is a path of paths), not off a defensive branch in each reader.
     """
 
     raw = state.get("doc_catalog")
     if isinstance(raw, str | bytes) or not isinstance(raw, Sequence):
         return []
-    return [entry for entry in raw if isinstance(entry, DocSummary)]
+    return [_repaired(entry) for entry in raw if isinstance(entry, DocSummary)]
+
+
+def _repaired(doc: DocSummary) -> DocSummary:
+    """One catalog entry with ``sections`` resolved to its declared shape, paths of headings.
+
+    The construction sites are the fix (``section_paths`` is the single conversion they all
+    call); this is the reader's own boundary still refusing to lie about coverage if a
+    flat-shaped summary ever reaches it. Already well-formed summaries are returned
+    unchanged, so the repair costs one ``isinstance`` pass on every element.
+    """
+
+    if all(isinstance(path, tuple) for path in doc.sections):
+        return doc
+    return dataclasses.replace(doc, sections=section_paths(doc.sections))
 
 
 def _catalog_text(docs: Sequence[DocSummary]) -> str:
