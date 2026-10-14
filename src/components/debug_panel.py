@@ -29,6 +29,10 @@ What is rendered (``docs/OBSERVABILITY.md``'s debug-panel contract)
 3. **Retrieval** — the selected chunks in fused-rank order: dense, sparse, and fused
    RRF scores, page, section path, and a truncated evidence snippet.
 4. **Grounding** — the grounded flag, the refusal reason, and the citation count.
+   When ``planner_degraded`` is set the section also carries the "planner degraded"
+   badge: the refusal was a planner failure degraded into a refusal, not a judgement.
+   A stored message never carries the flag, so the section says it was not recorded
+   rather than implying the planner was healthy.
 
 Deliberately absent: the deterministic pre-pass rejections and the per-claim verdicts
 (ADR-007). Those live in the ``events`` table and in the answer text, not on the
@@ -114,6 +118,20 @@ _GROUNDED_LABEL = "grounded"
 _UNGROUNDED_LABEL = "ungrounded"
 _UNKNOWN_LABEL = "not recorded"
 
+#: The degraded-planner marker and the two lines it renders. ``PLANNER_DEGRADED_COPY``
+#: is the single word-source for the marker: ``src.components.chat`` renders the same
+#: badge and the same sentence under a degraded refusal in the transcript, so the two
+#: surfaces cannot drift into different claims about the same turn.
+PLANNER_DEGRADED_LABEL = "planner degraded"
+PLANNER_DEGRADED_COPY = (
+    "This refusal was not a judgement: the query planner failed, so the question was "
+    "classified out of scope instead of being reasoned about."
+)
+PLANNER_DEGRADED_NOT_RECORDED_COPY = (
+    "Not recorded for this answer — the planner-degraded marker is carried only on a "
+    "live answer, so a stored row says neither way."
+)
+
 #: Copy for the states the objects themselves make visible.
 _NO_ANSWER_COPY = "No answer selected: pass a live envelope or a stored message."
 _PLAN_NOT_RECORDED_COPY = (
@@ -179,6 +197,13 @@ class _PanelView:
     grounded: bool | None
     refusal_reason: str
     citation_count: str
+    planner_degraded: bool | None
+    """The degraded-planner flag, or ``None`` when the answer never carried one.
+
+    ``None`` (the stored-message shape) is *not* ``False``: the store has no column for
+    the flag, so a historical answer is "not recorded", never "not degraded". That is
+    the same distinction :data:`_UNKNOWN_LABEL` draws for ``grounded``.
+    """
 
 
 # --- the public renderer -----------------------------------------------------------
@@ -197,7 +222,8 @@ def render_debug_panel(
     answer: a live answer arrives as the frozen ``AnswerEnvelope`` the graph returned
     (the only shape carrying ``plan`` and ``retrieval_debug``), a historical one as the
     stored ``Message`` read back from the chat store. The sections a stored answer
-    cannot fill state that they were not recorded instead of rendering empty.
+    cannot fill state that they were not recorded instead of rendering empty — including
+    the planner-degraded flag, which only a live envelope carries.
 
     Args:
         envelope: The live answer to render. Wins when both arguments are given.
@@ -245,6 +271,7 @@ def _answer_view(
             grounded=_flag(_attr(envelope, "grounded")),
             refusal_reason=_as_text(_attr(envelope, "refusal_reason")),
             citation_count=_count_text(_attr(envelope, "citations")),
+            planner_degraded=_flag(_attr(envelope, "planner_degraded")),
         )
     if message is not None:
         return _PanelView(
@@ -255,6 +282,9 @@ def _answer_view(
             grounded=_flag(_attr(message, "grounded")),
             refusal_reason=_as_text(_attr(message, "refusal_reason")),
             citation_count=_count_text(_attr(message, "citations")),
+            # A stored row has no planner-degraded column (see ``final_envelope``'s
+            # persistence note), so history reads as never recorded rather than clear.
+            planner_degraded=None,
         )
     return None
 
@@ -380,6 +410,11 @@ def _render_grounding(view: _PanelView) -> None:
                 _GROUNDED_LABEL if view.grounded else _UNGROUNDED_LABEL,
                 kind="success" if view.grounded else "warn",
             )
+        if view.planner_degraded is True:
+            badge(PLANNER_DEGRADED_LABEL, kind="error")
+            caption_note(PLANNER_DEGRADED_COPY)
+        elif view.planner_degraded is None:
+            caption_note(PLANNER_DEGRADED_NOT_RECORDED_COPY)
         figure(view.citation_count, prefix="citations ")
         st.html(_field_row("refusal", view.refusal_reason))
         caption_note(_VERDICT_NOTE)

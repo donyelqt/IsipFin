@@ -7,8 +7,9 @@ reload) and calls nothing — no retrieval, no prompt, no gateway, no
 :class:`~src.chains.graph` import. Every state the demo script exercises is present:
 the centered hero for an empty session, the transcript for a populated one, a waiting
 bubble while the answer is produced, citation cards under every cited answer, an
-explicit ungrounded marker when the verifier did not pass a claim through, and an
-error block with a retry action for a failed turn.
+explicit ungrounded marker when the verifier did not pass a claim through, a
+"planner degraded" marker when the refusal is a planner failure rather than a scope
+decision, and an error block with a retry action for a failed turn.
 
 Public surface
 --------------
@@ -41,6 +42,7 @@ from typing import TYPE_CHECKING
 
 import streamlit as st
 
+from src.components import debug_panel
 from src.components.theme import badge as theme_badge
 from src.components.theme import caption_note as theme_caption_note
 from src.components.theme import eyebrow as theme_eyebrow
@@ -157,6 +159,15 @@ _UNGROUNDED_COPY = (
     "as unverified and check the citations below."
 )
 
+#: The degraded-planner marker: the sentence a person asking the question reads when the
+#: turn they are looking at was never reasoned about. ``final_envelope`` carries the
+#: marker from ``analyze_question``'s degrade path onto the envelope; the debug panel
+#: renders the same badge and the same sentence, so the transcript and the panel cannot
+#: state different things about the same turn (the wording lives in
+#: :mod:`src.components.debug_panel` and is not written a second time here).
+PLANNER_DEGRADED_LABEL = debug_panel.PLANNER_DEGRADED_LABEL
+PLANNER_DEGRADED_COPY = debug_panel.PLANNER_DEGRADED_COPY
+
 #: Waiting bubble copy while the graph runs.
 PENDING_COPY = "Searching the documents, then checking the answer against them."
 
@@ -178,12 +189,18 @@ class _AnswerView:
     a live path and a history path that drift. The citation objects themselves stay
     duck-typed: the two packages each define their own ``Citation`` class with the
     same five attributes.
+
+    ``planner_degraded`` is the fifth field, and it is ``None`` — never ``False`` — for
+    a stored answer, because the store persists no such column. A live envelope always
+    carries a bool, defaulting to ``False``, so a healthy planner is never marked and
+    a degraded one always is.
     """
 
     answer_md: str
     grounded: bool | None
     refusal_reason: str | None
     citations: tuple[object, ...]
+    planner_degraded: bool | None
 
 
 def render_empty_state(*, doc_labels: Sequence[str] | None = None) -> str | None:
@@ -290,10 +307,10 @@ def render_answer(
     """Render one live answer returned by ``src.chains.graph.invoke``.
 
     Args:
-        answer: The frozen envelope: ``answer_md``, ``citations``, ``grounded`` and
-            ``refusal_reason``. Nothing else on the envelope reaches the user from this
-            module — ``plan``, ``retrieval_debug`` and ``node_trace`` belong to the
-            debug panel, which is a separate component.
+        answer: The frozen envelope: ``answer_md``, ``citations``, ``grounded``,
+            ``refusal_reason`` and ``planner_degraded``. Nothing else on the envelope
+            reaches the user from this module — ``plan``, ``retrieval_debug`` and
+            ``node_trace`` belong to the debug panel, which is a separate component.
         doc_names: ``doc_id`` → display name for the citation cards.
         role_key: Uniquifier for the role container's widget key. Streamlit refuses a
             duplicate key on one page, so a transcript with several answers needs one
@@ -305,6 +322,7 @@ def render_answer(
         grounded=answer.grounded,
         refusal_reason=answer.refusal_reason or None,
         citations=tuple(answer.citations or ()),
+        planner_degraded=bool(answer.planner_degraded),
     )
     _render_answer_view(view, doc_names=doc_names, role_key=role_key)
 
@@ -333,6 +351,9 @@ def render_stored_answer(
         grounded=getattr(message, "grounded", None),
         refusal_reason=(getattr(message, "refusal_reason", None) or None),
         citations=tuple(getattr(message, "citations", ()) or ()),
+        # The store persists no planner-degraded column, so a historical answer never
+        # claims one — ``None`` keeps the marker off a refusal the row never judged.
+        planner_degraded=getattr(message, "planner_degraded", None),
     )
     _render_answer_view(view, doc_names=doc_names, role_key=role_key)
 
@@ -483,8 +504,20 @@ def _render_answer_view(
 
 
 def _render_markers(view: _AnswerView) -> None:
-    """Render the grounding badge/caption block under an answer."""
+    """Render the grounding badge/caption block under an answer.
 
+    A degraded-planner refusal renders the "planner degraded" badge and its sentence
+    *in place of* the Refusal badge's reason line, not in addition to a healthy-looking
+    one: the reason would name a coverage gap the planner never judged. The
+    ``grounded`` badge above it is suppressed on that path too, because a degraded run
+    never reached verification, so neither "grounded" nor "ungrounded" is a claim about
+    this turn.
+    """
+
+    if view.planner_degraded is True:
+        theme_badge(PLANNER_DEGRADED_LABEL, kind="error")
+        theme_caption_note(PLANNER_DEGRADED_COPY)
+        return
     if view.refusal_reason:
         theme_badge("Refusal", kind="neutral")
         reason = _REFUSAL_REASON_COPY.get(view.refusal_reason, _REFUSAL_REASON_COPY["unspecified"])
