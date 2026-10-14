@@ -207,11 +207,6 @@ NEW_SESSION_NO_STORE_HELP = (
 #: names as drop-in compatible, so switching provider is a pick rather than an edit.
 DEFAULT_MODELS: tuple[str, ...] = (
     "",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4.1-mini",
-    "llama3.1",
-    "qwen2.5",
 )
 
 #: ``temperature`` bounds. Synthesis is user-adjustable
