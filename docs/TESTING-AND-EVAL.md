@@ -9,8 +9,12 @@
   `src/utils/mock_llm.py`) or stub transports; embeddings in unit tests come from a
   deterministic fake. CI proves this on every push.
 - Tests target **behavior and invariants**, never wiring or text copies.
-- The golden QA set is the only test allowed to be slow and network-dependent; it runs as a
-  script (`scripts/eval_rag.py`), not in the pytest suite.
+- The golden QA set is the only test allowed to be slow and network-dependent. It has **two
+  modes**, one harness (`scripts/eval_rag.py`): `MOCK_LLM=1` runs hermetic and keyless (deterministic
+  mock LLM + sha256 hash embedder), and a keyed run uses the real LLM. It is a script rather than
+  part of the pytest suite, but the verdict/exit logic itself is pinned in `tests/test_eval_rag.py`,
+  so which pass bar each metric carries — and that the harness exits nonzero on regression — is a
+  hermetic assertion, not a keyed-run observation.
 
 ## Layer 1 — Unit tests (hermetic, `pytest -q`)
 
@@ -28,7 +32,11 @@
 
 ## Layer 2 — Golden QA eval (`scripts/eval_rag.py`)
 
-Runs N golden questions against the MSFT FY2023 corpus with the **real** LLM, reports:
+Runs the golden questions against the MSFT FY2023 corpus in **either** mode — `MOCK_LLM=1`
+(keyless, deterministic, the CI path) or a real keyed LLM — and reports the same table in both.
+Each mode changes what a metric can mean, and the harness prints `NA` with its reason rather
+than scoring a number the run cannot decide. No bar is lowered in either mode; an `NA` cell is
+"no verdict" and never drives the exit code.
 
 | Metric | Definition | Pass bar |
 |---|---|---|
@@ -37,6 +45,19 @@ Runs N golden questions against the MSFT FY2023 corpus with the **real** LLM, re
 | Figure match | the expected figure appears verbatim | ≥ 0.95 |
 | Wrong-year contamination | an adjacent-year figure appears where the asked year's figure was expected | 0 (hard fail) |
 | Refusal correctness | out-of-scope questions refused; in-scope questions answered | 1.0 / ≥ 0.95 |
+
+### What each mode can measure
+
+| Metric | `MOCK_LLM=1` (keyless) | Real LLM (keyed) |
+|---|---|---|
+| Retrieval hit-rate@5 | **N/A** — the mock embedder hashes each text, so a question's dense vector is noise and the fused top-5 is a BM25 ordering with noise on top | fully measurable |
+| Citation presence | **N/A** — the mock cites only blocks containing its figure, so "≥1 valid marker" measures where retrieval happened to land | fully measurable |
+| Figure match | **N/A** — the mock answers from scripted phrases plus the retrieved contexts, so a figure's presence measures the script | fully measurable |
+| Wrong-year contamination | **fully measurable** — it reads the answer's own figures and their layout (a whole sentence, a table cell against its column header), so it is lexical and mode-independent, and can FAIL under `MOCK_LLM=1` | fully measurable |
+| Refusal correctness | **partially measurable** — the mock planner refuses only on a fiscal period the corpus does not cover, so the `time_period` case (Q9) is scoreable and the `entity` case (Q10) is not, its plan never being out-of-scope to begin with | fully measurable |
+
+Every `NA` cell prints its observed value labelled as an observation, never as a verdict, so
+"this mode cannot answer it" is never read as "it failed".
 
 ### Seed golden set (`tests/data/golden_qa.jsonl`)
 
@@ -73,6 +94,7 @@ discrepancy is itself a finding for the journal (wrong chunk captured the wrong 
 ```bash
 pytest -q                          # full hermetic suite (must never need network)
 pytest -q tests/test_retrieval.py  # focused
+MOCK_LLM=1 python scripts/eval_rag.py  # keyless golden run (hermetic, deterministic)
 python scripts/eval_rag.py         # golden QA against real LLM (needs OPENAI_API_KEY)
 ruff check src tests scripts app.py && black --check src tests scripts app.py
 ```
