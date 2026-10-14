@@ -70,10 +70,41 @@ degradation lands on in-scope and out-of-scope cases alike. The exclusion is rec
 case (``cases not measured``) and drives the exit code, so hiding a case behind it can
 never look like passing.
 
+**Pacing (real-LLM mode only).** A keyed run against a per-minute token ceiling — Groq's
+free tier is 8,000 TPM, and one in-scope case on this corpus measures about 10,038 tokens
+(P1 2,038 + P3 5,900 + P5 2,100, plus ~600 for a P2 rewrite) — cannot run back-to-back:
+every request would overshoot the window before it was sent. The gateway's own
+``retry-after`` handling is *reactive*; this pacer is the proactive half. Before each case
+it projects the cost the next case will add, waits until the rolling per-minute window has
+room, and prints the arithmetic so a reader can tell a wait from a hang.
+
+Two ceilings, because a provider publishes both, and the daily one is the harder wall. The
+per-minute ceiling is smoothable by waiting. The daily one is not: the run spends it and the
+day is over. The ten-case golden set measures about 100K tokens, roughly half of Groq free
+tier's 200K/day allowance, so a full keyed run is *not* repeatable on a free key:
+``MOCK_LLM=1`` is the reproducible path (zero tokens, deterministic), and the keyed provider
+is there for a single-question demonstration. The harness refuses to start a run projected
+to spend past the day's usable share unless ``EVAL_TPD_OVERRIDE=1`` says so outright.
+
+Under ``MOCK_LLM=1`` the pacer is inert: no projection, no window, no sleep, and no token
+line in the report. A mock case costs zero provider tokens.
+
+Environment (all optional, all real-LLM mode only):
+
+=============================  ==============  ===========================================
+Variable                       Default        Meaning
+=============================  ==============  ===========================================
+``EVAL_TPM_LIMIT``             8000           the per-minute token ceiling to pace against
+``EVAL_TPD_LIMIT``             200000         the daily token ceiling
+``EVAL_TPD_BUDGET``            (fraction)     tokens this run may spend today
+``EVAL_TPD_FRACTION``          1.0            fraction of the daily ceiling to spend
+``EVAL_TPD_OVERRIDE``          (unset)        ``1`` disables the daily pre-flight gate
+=============================  ==============  ===========================================
+
 Usage::
 
-    MOCK_LLM=1 python scripts/eval_rag.py       # hermetic, offline, deterministic
-    python scripts/eval_rag.py                  # real LLM (needs OPENAI_API_KEY)
+    MOCK_LLM=1 python scripts/eval_rag.py       # hermetic, offline, deterministic, un-paced
+    python scripts/eval_rag.py                  # real LLM (needs OPENAI_API_KEY), paced
     python scripts/eval_rag.py --only q01,q03   # score a subset of cases
     python scripts/eval_rag.py --data <path>    # another golden set
     python scripts/eval_rag.py --json out.json  # machine-readable report
@@ -84,11 +115,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,6 +157,56 @@ HARD_METRICS = frozenset({"wrong_year_contamination"})
 
 #: How many fused children count as "top-5" for hit-rate (the metric's own name).
 HIT_RANK = 5
+
+# --- provider budget ----------------------------------------------------------------
+#
+# Groq's free tier enforces a **rolling 8,000 tokens-per-minute** ceiling, and the same
+# number for a daily one. The measured cost of this corpus (``data/index``, 384-dim
+# fastembed) is one in-scope case costing about 10,000 tokens:
+#
+# ============  ========  ==========================================================
+# node          tokens    what it is
+# ============  ========  ==========================================================
+# P1 planner    ~2,038    305 (system) + 766 (catalog JSON) + 9 (question) + 128 (schema)
+# P3 synthesis  ~5,900    the 23k chars of retrieved context — irreducible, it carries
+#                            the passages
+# P5 verify      ~2,100    the answer and its claims
+# ============  ========  ==========================================================
+#
+# A P2 rewrite adds ~600 with history. So one case is 125% of *one minute's* budget, and
+# the ten-case golden set is ~100,000 tokens — about half of a daily 200K allowance in a
+# single run. Running the set back-to-back makes a 429 a certainty rather than
+# embarrassingly bad luck: the request that cannot fit (``Requested 8087`` against a
+# ``Used 6537 / 8000`` window) is not a race, it is arithmetic.
+#
+# The gateway already honours a 429's ``retry-after``, which is *reactive*. What was
+# missing is a pacer that knows a case is about to overshoot and waits first.
+#
+# The limits below are the ceiling of each *env override*'s acceptance, not a different
+# default: a ceiling of zero or below would make every projection overshoot, so the
+# harness's own fallback applies rather than an infinite wait.
+DEFAULT_TPM_LIMIT = 8000
+#: Groq's published free-tier daily allowance, for the ``EVAL_TPD_LIMIT`` default. The
+#: keyed models are ``openai/gpt-oss-120b``, ``openai/gpt-oss-20b`` and
+#: ``qwen/qwen3.8-27b`` — all three carry 8K TPM / 200K TPD, so the daily number is the
+#: one a run cannot work around. ``allam-2-7b`` raises it to 500K but *lowers* TPM to 6K
+#: and is a 7B model that cannot hold the citation contract, so it is a bad trade and is
+#: not what this default is for.
+DEFAULT_TPD_LIMIT = 200_000
+#: A run spends at most this fraction of the daily allowance before it is refused. A run
+#: that spends everything a free key has leaves tomorrow with nothing, which is a footgun
+#: a pacer should not aim at.
+DEFAULT_TPD_FRACTION = 1.0
+#: How long one projection may push the pacer into the future before it is a runaway
+#: rather than a wait. Beyond this, the case runs and let the provider's own 429 decide:
+#: a best estimate is a projection, not an instrument, and guessing badly must never
+#: wedge the harness. Both bounds are generous against the measured numbers — a whole
+#: ten-case sweep is ~12.5 minutes of TPM headroom.
+TPM_WAIT_CAP_SECONDS = 30 * 60
+TPD_WAIT_CAP_SECONDS = 60 * 60
+#: The message a user must change to say "yes, spend it", spelled once so the harness,
+#: its report and its tests all read the same escape hatch.
+TPD_OVERRIDE_HINT = "EVAL_TPD_OVERRIDE=1"
 #: Every space that carries no meaning around a printed figure. The corpus prints its
 #: tables with typographic spaces — a thin space (``U+2009``) between a value and its
 #: ``$``, three-per-em (``U+2004``) and figure space (``U+2007``) inside a row — and an
@@ -501,6 +583,11 @@ class CaseResult:
     ranks: list[tuple[str, int]] = field(default_factory=list)
     retrieved: list[str] = field(default_factory=list)
     nodes: list[str] = field(default_factory=list)
+    #: The tokens this case's run really cost, ``(in, out)`` read off the envelope's own
+    #: ``node_trace`` — the same numbers ``@trace_node`` recorded and ``app.py``'s
+    #: ``_trace_payload`` persists. It is measured truth, never an estimate of prompt
+    #: length, so the pacer's projection is a cost this pipeline has actually paid.
+    tokens: tuple[int, int] = (0, 0)
     latency_ms: float = 0.0
     history_turns: int = 0
     history_note: str = ""
@@ -547,6 +634,17 @@ class CaseResult:
         """
 
         return _infrastructure_degradation(self.degraded_reason)
+
+    @property
+    def token_cost(self) -> int:
+        """This case's total tokens: prompt plus completion, as the providers count them.
+
+        Both halves count against a TPM *and* a TPD ceiling — a completion token is a token
+        in every published table — so the pacer sums them rather than picking the one a
+        rate limit happens to name first.
+        """
+
+        return int(self.tokens[0]) + int(self.tokens[1])
 
     @property
     def failed(self) -> bool:
@@ -961,6 +1059,405 @@ def _route_of(plan_kind: str) -> str:
     )
 
 
+# --- the token-budget pacer ---------------------------------------------------------
+
+
+@dataclass
+class _Projection:
+    """What the pacer thinks starting one case will cost, before it starts.
+
+    ``wait_seconds`` is how long the harness intends to sleep, not how long the run took:
+    a reader can tell a pacer from a hang only if the intention is written down. ``reason``
+    is the arithmetic behind it, printed verbatim.
+    """
+
+    tokens: int
+    wait_seconds: float
+    reason: str
+
+    def __bool__(self) -> bool:
+        """A projection with no cost and no wait is nothing to report."""
+
+        return self.tokens > 0 or self.wait_seconds > 0.0
+
+
+class _TokenPacer:
+    """Paces one sweep against a provider's per-minute and per-day token ceilings.
+
+    The whole design, in one sentence: a rolling window of what this run has actually
+    spent, and a projection read from the cost a real prior case really paid. There is no
+    estimate-from-prompt-length anywhere, because the measurement is already in the
+    result: every case's LLM calls land in ``node_trace`` as ``tokens_in`` / ``tokens_out``,
+    so the pacer reads the same numbers ``@trace_node`` recorded.
+
+    Why a projection and not a budget check: the ceiling is rolling, so the honest question
+    is not "is the window full" but "how long until a request of this size fits". The pacer
+    answers that, waits exactly that long in whole seconds, and degrades to "run it and let
+    the provider's own 429 decide" the moment its own numbers stop making sense.
+
+    Two ceilings, and the daily one is the harder wall. The per-minute ceiling is smoothable
+    — sleep until the span's worth of spend clears. The per-day ceiling cannot be smoothed
+    at all: the run spends it and the day is over, so the harness refuses to start a run
+    that would spend more than the day's usable share, or says so out loud first.
+    """
+
+    def __init__(
+        self,
+        *,
+        tpm_limit: int,
+        tpd_limit: int,
+        mock_mode: bool,
+        allowed_today: int,
+        daily_gate: bool = True,
+        now: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.tpm_limit = int(tpm_limit)
+        self.tpd_limit = int(tpd_limit)
+        self.mock_mode = mock_mode
+        #: What the day's allowance leaves for this run, after whatever already spent it.
+        #: A run that asks for more is refused in :meth:`check_daily`, not throttled: a
+        #: sleep cannot put tokens back into a day.
+        self.allowed_today = int(allowed_today)
+        #: Whether the daily gate may refuse at all. ``EVAL_TPD_OVERRIDE=1`` turns it off —
+        #: the escape hatch for a user who has decided the day's quota is worth spending.
+        #: It changes nothing about the report: the projection still prints either way.
+        self.daily_gate = bool(daily_gate)
+        self._now = now
+        self._sleep = sleep
+        #: ``(monotonic timestamp, token cost)`` for every case finished in this run, in
+        #: order. The per-minute ceiling is *rolling*, so the window is a list of stamps
+        #: and not a bucket reset on the minute: a sweep running long straddles the
+        #: boundary, and a bucket would forget nothing and let the projection overshoot.
+        self._spend: list[tuple[float, int]] = []
+        self.waits: list[float] = []
+
+    # -- reading the provider's own numbers --------------------------------------------
+
+    def _minutes_window(self) -> list[tuple[float, int]]:
+        """The spend still inside the rolling per-minute window.
+
+        An entry clears 60 seconds after it was stamped, which is the same span the
+        provider counts against. Entries that have rolled out are dropped here, so the
+        window forgets on its own and a long run cannot accumulate a debt that never
+        clears.
+        """
+
+        now = self._now()
+        return [item for item in self._spend if now - item[0] < 60.0]
+
+    def _seconds_until_token_slot(self, tokens: int) -> float:
+        """How long until a request of ``tokens`` fits inside the rolling window.
+
+        The window drains from its oldest entry forward, so the moment a request fits is
+        the moment the earliest entries have cleared: for each entry, if dropping it makes
+        room, the wait is that entry's own expiry. A projection larger than the whole
+        ceiling never fits at all, and says so rather than returning a wait that cannot
+        happen.
+        """
+
+        if tokens <= 0 or self.tpm_limit <= 0:
+            return 0.0
+        if tokens > self.tpm_limit:
+            # A request this size cannot fit in any window the rate limit allows. The
+            # provider's own 429 is the honest handler here, and the pacer says so rather
+            # than pretending a sleep can shrink a prompt.
+            return math.inf
+        window = self._minutes_window()
+        used = sum(cost for _, cost in window)
+        if used + tokens <= self.tpm_limit:
+            return 0.0
+        # Oldest first: each entry clears 60s after it was stamped. Dropping every entry
+        # always makes room — what is left of the window is ``tokens``, which fits by the
+        # check above — so this loop always returns while the window is well-formed.
+        running = used
+        for stamp, cost in window:
+            running -= cost
+            if running + tokens <= self.tpm_limit:
+                return max(0.0, stamp + 60.0 - self._now())
+        # Reached only if the window holds entries older than its own span, which is the
+        # shape a bucket-style window would produce and this one does not. The safe
+        # direction is to wait: dispatching a request that overshoots is the failure the
+        # pacer exists to prevent, while waiting too long is only slow.
+        return max(0.0, window[-1][0] + 60.0 - self._now())
+
+    # -- the two questions the harness asks --------------------------------------------
+
+    def _project(self, tokens: int) -> _Projection:
+        """What starting a case costing ``tokens`` would take, right now.
+
+        A case that costs nothing — an ancestor replayed for history, a degraded refusal, a
+        mock run — has no projection: there is nothing to wait for, so silence is the
+        correct answer and not an omission.
+        """
+
+        if tokens <= 0:
+            return _Projection(0, 0.0, "")
+        used = sum(cost for _, cost in self._minutes_window())
+        seconds = self._seconds_until_token_slot(tokens)
+        if seconds <= 0.0:
+            return _Projection(tokens, 0.0, "")
+        if not math.isfinite(seconds):
+            return _Projection(
+                tokens,
+                0.0,
+                f"~{tokens} tokens is larger than the whole {self.tpm_limit} TPM window, "
+                "so no wait can make it fit: it runs, and the provider's own 429 decides",
+            )
+        waited = min(seconds, TPM_WAIT_CAP_SECONDS)
+        return _Projection(
+            tokens,
+            waited,
+            f"~{tokens} tokens against {used} in the rolling {self.tpm_limit} TPM window — "
+            f"waiting {waited:.1f}s for the window to clear",
+        )
+
+    def _refuse_reason(self, tokens: int) -> str:
+        """Why a projected run must not start, or ``""`` when it may."""
+
+        shortfall = max(0, tokens - self.allowed_today)
+        if shortfall <= 0:
+            return ""
+        return (
+            f"~{tokens} tokens projected against the day's ~{self.allowed_today:,} of "
+            f"{self.tpd_limit:,} — {shortfall:,} tokens short. A daily ceiling cannot be "
+            f"slept off, and a run that spends past it cannot be re-run: refusing to "
+            f"start, so today's quota survives. Set {TPD_OVERRIDE_HINT} to spend it anyway"
+        )
+
+    # -- the entry points the harness calls --------------------------------------------
+
+    def check_daily(self, tokens: int) -> str:
+        """Whether a run of ``tokens`` may start, as a refusal reason or ``""``.
+
+        This is a *pre-flight* gate, not a throttle: a daily ceiling is a wall the day
+        erases, so the honest options are to spend knowingly or not to spend at all. A run
+        that is refused never starts, which keeps its tokens available for tomorrow. Under
+        ``MOCK_LLM=1`` the projection is zero tokens, so nothing is ever refused.
+        """
+
+        if self.mock_mode or tokens <= 0 or not self.daily_gate:
+            return ""
+        return self._refuse_reason(tokens)
+
+    def gate(
+        self, tokens: int, *, label: str = "", quiet: bool = False, stream: Any = None
+    ) -> float:
+        """Wait for room before a case starts, and return the seconds actually waited.
+
+        Zero means no wait, which is the common answer: a projection that fits is served
+        immediately rather than made to wait on a budget it is not close to. The pacer's
+        wait is reported even when it is zero, so a reader never has to guess whether a
+        slow case was paced or hung.
+        """
+
+        if self.mock_mode or tokens <= 0:
+            return 0.0
+        projection = self._project(tokens)
+        if projection.wait_seconds <= 0.0:
+            self._note(quiet, stream, projection, label)
+            return 0.0
+        waited = self._sleep_for(projection.wait_seconds)
+        self.waits.append(waited)
+        self._note(quiet, stream, projection, label)
+        return waited
+
+    def _sleep_for(self, seconds: float) -> float:
+        """Sleep in whole seconds, so the window's own 60s entries clear exactly.
+
+        A fractional sleep under the expiry time would wake while the window is still full
+        and dispatch a request the provider has already refused — the pacing would work and
+        the 429 would arrive anyway.
+        """
+
+        whole = max(1.0, math.ceil(seconds))
+        self._sleep(whole)
+        return whole
+
+    @staticmethod
+    def _note(quiet: bool, stream: Any, projection: _Projection, label: str) -> None:
+        """One line of pacing arithmetic, on the run's own stream, never in quiet mode."""
+
+        if quiet or not projection:
+            return
+        print(f"  pacing         : {projection.reason} {label}".rstrip(), file=stream)
+
+    def record(self, tokens: int) -> None:
+        """Stamp a finished case's real cost into the rolling window."""
+
+        if self.mock_mode or tokens <= 0:
+            return
+        self._spend.append((self._now(), int(tokens)))
+
+    def projected_cost(self, results: Mapping[str, Any]) -> int:
+        """What the next case is expected to cost: the highest measured prior in this run.
+
+        The maximum rather than the mean, for a reason the arithmetic forces: the ceiling is
+        a per-request ceiling as well as a rolling one, and the case that would overshoot
+        first is the *most* expensive one. Averaging in a cheap case would under-predict it
+        and dispatch a request the provider then has to refuse.
+
+        With no prior case there is nothing measured to project from, so zero: the first
+        case of a run dispatches un-paced, which costs at most one overshoot on the same
+        reactive path the 429 already carries.
+        """
+
+        if self.mock_mode:
+            return 0
+        costs = [
+            result.token_cost for result in results.values() if getattr(result, "token_cost", 0)
+        ]
+        return max(costs) if costs else 0
+
+
+#: What a case *starts* costing, measured on this corpus (``data/index``, 384-dim
+#: fastembed) against Groq's ``openai/gpt-oss-*`` keyed models. P1 2,038 + P3 5,900 + P5
+#: 2,100 is one in-scope case; a case whose follow-up needs a P2 rewrite adds ~600. A
+#: refusal case gates at the fiscal-year boundary and never reaches the provider at all.
+#:
+#: These are the *first* projection of a run — used to estimate a fresh keyed run's total
+#: before anything has been measured. Once cases have run, their real ``node_trace`` cost
+#: replaces these numbers, so a run is forecast on measured truth wherever one exists.
+CANONICAL_CASE_TOKENS = 10_038
+#: The extra a follow-up costs: P2's rewrite call, which replays the ancestor's history.
+FOLLOW_UP_CASE_TOKENS = 600
+
+
+def _projected_run_cost(cases: Sequence[Any], prior_cost: int = 0) -> int:
+    """The projected total token cost of a requested set, for the pre-flight report.
+
+    ``prior_cost`` is a measured cost this run has already established, used per case it has
+    actually run — measured truth beats a table — with the table's canonical figure standing
+    in for anything not yet measured. The daily gate needs a *total* because the daily
+    ceiling is not smoothable: a per-case projection would refuse the run one case at a time
+    and still spend the day.
+    """
+
+    if not cases:
+        return 0
+    total = 0
+    for case in cases:
+        if getattr(case, "is_refusal", False):
+            # A refusal case gates on the fiscal years the corpus covers (ADR-010) and
+            # never reaches a provider, so it costs nothing to project.
+            continue
+        per_case = prior_cost or CANONICAL_CASE_TOKENS
+        if getattr(case, "follow_up_of", None):
+            per_case += FOLLOW_UP_CASE_TOKENS
+        total += per_case
+    return total
+
+
+def _env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or ``default`` when it is not usable.
+
+    A typo or a blank must not silently become zero — a zero ceiling would make every
+    projection overshoot and every run wait forever — so anything unparseable or
+    non-positive falls back to the documented default.
+    """
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _env_flag(name: str) -> bool:
+    """Whether an environment flag is set to ``1``, ``true`` or ``yes``."""
+
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _tpm_limit_from_env(default: int = DEFAULT_TPM_LIMIT) -> int:
+    """The per-minute ceiling this run is held to, from ``EVAL_TPM_LIMIT`` or the default.
+
+    The default is Groq's published free tier (8,000 TPM). A paid tier or another provider
+    raises it by exporting a larger number; nothing else has to change.
+    """
+
+    return _env_int("EVAL_TPM_LIMIT", default)
+
+
+def _allowed_today_from_env(limit: int) -> int:
+    """How much of the daily allowance this run may spend before it is refused.
+
+    ``EVAL_TPD_BUDGET`` is a token count and takes precedence — the case where a key has
+    already spent part of its day, which is exactly the number to hand over.
+    ``EVAL_TPD_FRACTION`` (default :data:`DEFAULT_TPD_FRACTION`) is the common case: a
+    fraction of the ceiling.
+    """
+
+    raw = os.environ.get("EVAL_TPD_BUDGET", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return max(1, int(DEFAULT_TPD_LIMIT))
+    try:
+        fraction = float(os.environ.get("EVAL_TPD_FRACTION", "").strip() or DEFAULT_TPD_FRACTION)
+    except ValueError:
+        fraction = DEFAULT_TPD_FRACTION
+    if fraction <= 0.0:
+        return 0
+    return max(0, int(limit * fraction))
+
+
+def _daily_gate_enabled() -> bool:
+    """Whether the pre-flight daily gate may refuse a run. ``EVAL_TPD_OVERRIDE=1`` says no.
+
+    The gate never refuses under ``MOCK_LLM=1`` at all: a mock case costs zero tokens, so
+    its projected spend is zero and there is nothing to refuse.
+    """
+
+    return not _env_flag("EVAL_TPD_OVERRIDE")
+
+
+def _max_measured_cost(results: Mapping[str, Any]) -> int:
+    """The highest token cost this run has actually paid so far, or zero.
+
+    Read from the finished results, so a follow-up's projection is based on what the
+    earlier cases really cost rather than on a table. Zero means nothing has run yet —
+    the state a fresh run is in, and the state the canonical table stands in for.
+    """
+
+    costs = [result.token_cost for result in results.values() if getattr(result, "token_cost", 0)]
+    return max(costs) if costs else 0
+
+
+def _print_preflight(
+    projected: int,
+    pacer: _TokenPacer,
+    cases: Sequence[Any],
+    *,
+    quiet: bool = False,
+    stream: Any = None,
+) -> None:
+    """The run's projected spend, and what it means against the day's allowance.
+
+    A silent pacer is indistinguishable from a hang, and a pacer that lets a user hand over
+    half their daily quota without a word is a footgun: so the projection is printed before
+    the first case dispatches, with the fraction of the day it would spend spelled out.
+    """
+
+    if quiet or pacer.mock_mode:
+        return
+    head = f"  tpm ceiling     : {pacer.tpm_limit:,} tokens/min"
+    print(head, file=stream)
+    if not projected:
+        print("  projected spend : 0 tokens (nothing meets a provider)", file=stream)
+        return
+    share = projected / pacer.tpd_limit if pacer.tpd_limit else 0.0
+    print(
+        f"  projected spend : ~{projected:,} tokens for {len(cases)} case(s) — "
+        f"{share:.0%} of the day's {pacer.tpd_limit:,} allowance",
+        file=stream,
+    )
+
+
 # --- the five metrics, per case ------------------------------------------------------
 
 
@@ -1238,8 +1735,15 @@ def _run_case(
     ctx: _RunContext,
     ancestors: Sequence[Case],
     results: Mapping[str, CaseResult],
+    pacer: _TokenPacer | None = None,
 ) -> CaseResult:
-    """Run one case through ``invoke()`` and score it. Never raises for a graph failure."""
+    """Run one case through ``invoke()`` and score it. Never raises for a graph failure.
+
+    ``pacer`` is the token budget the sweep is held to. It is a parameter rather than a
+    global so the pacer's clock and its sleeps can be injected in-process by the tests —
+    a test that really slept would test the sleep, not the pacing. ``None`` runs un-paced,
+    which is what the mock path and the ``_run_case``-without-a-budget callers want.
+    """
 
     from src.chains.graph import invoke
 
@@ -1256,6 +1760,14 @@ def _run_case(
             f"replayed {len(ancestors)} prior turn pair(s) as real Turn objects carrying "
             "cited_pages/entities from the earlier answers"
         )
+
+    if pacer is not None:
+        # The projection is the cost a *previous* case really paid, so the first case of a
+        # run has nothing to pace against and dispatches immediately. That is the one gap
+        # a rolling window cannot close on its own, and it costs at most one overshoot on
+        # the gateway's own reactive path.
+        projection = pacer.projected_cost(results)
+        pacer.gate(projection, label=f"(before {case.case_id})", quiet=ctx.mock_mode)
 
     started = time.perf_counter()
     try:
@@ -1294,15 +1806,51 @@ def _run_case(
         str(getattr(event, "node", "") or "")
         for event in (getattr(envelope, "node_trace", []) or [])
     ]
+    result.tokens = _trace_tokens(getattr(envelope, "node_trace", []) or [])
 
     _score_case(case, result, ctx.scopes)
+
+    if pacer is not None:
+        # The window is stamped with what this case *cost*, not with what it was projected
+        # to cost: the projection is a guess with a measured prior behind it, and the
+        # measured truth is what the next case is paced against. A run that paced on its
+        # own guesses would drift further from the provider's real window with every case.
+        pacer.record(result.token_cost)
     return result
+
+
+#: The ``NodeEvent`` field the token counts are read from, and the two halves of a
+#: ``(tokens_in, tokens_out)`` pair. ``@trace_node`` lifts both off the
+#: :class:`~src.utils.llm.ChatResult` a node's gateway call produced, so this is the
+#: provider's own accounting and never a length estimate.
+_TOKEN_FIELDS = ("tokens_in", "tokens_out")
+
+
+def _trace_tokens(events: Sequence[Any]) -> tuple[int, int]:
+    """``(tokens_in, tokens_out)`` summed over one run's whole ``node_trace``.
+
+    Read defensively, because the trace is the one part of the envelope that exists only
+    when instrumentation ran: an event missing its counts (a node that made no LLM call —
+    ``retrieve``, ``refuse``, the gate) contributes zero, and a trace that is not the
+    shape expected contributes zero rather than raising into a golden case's run. Summing
+    the *whole* run is what the pacer needs, since the ceiling counts every call a
+    question triggered, not the ones that produced the final answer.
+    """
+
+    totals = [0, 0]
+    for event in events or []:
+        for index, name in enumerate(_TOKEN_FIELDS):
+            value = event.get(name) if isinstance(event, Mapping) else getattr(event, name, None)
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            totals[index] += max(0, value)
+    return totals[0], totals[1]
 
 
 # --- per-case report -----------------------------------------------------------------
 
 
-def _print_case(result: CaseResult, position: int, total: int) -> None:
+def _print_case(result: CaseResult, position: int, total: int, mock_mode: bool = False) -> None:
     """One case's block: what it ran on and everything the five metrics saw."""
 
     case = result.case
@@ -1346,6 +1894,13 @@ def _print_case(result: CaseResult, position: int, total: int) -> None:
         f"nodes: {len(result.nodes)} ({','.join(result.nodes) or 'none'})"
     )
     print(f"  latency        : {result.latency_ms:7.1f} ms")
+    # Suppressed under MOCK_LLM=1: the mock's counts are scripted constants rather than a
+    # provider's accounting, so printing them would report a spend that never happened.
+    if not mock_mode and (result.tokens[0] or result.tokens[1]):
+        print(
+            f"  tokens         : {result.tokens[0]:,} in / {result.tokens[1]:,} out "
+            f"({result.token_cost:,} total, from this run's node_trace)"
+        )
 
     for figure in case.expected_appearances:
         state = "FOUND" if _contains_figure(result.answer_md, figure) else "MISSING"
@@ -1628,6 +2183,7 @@ def _print_summary(
     verdict = "PASS" if code == EXIT_PASS else "FAIL"
     print(f"{verdict} — {reason or 'every meaningful metric met its bar'}")
     _print_exit(code)
+    _print_pacing(results, mock_mode=ctx.mock_mode)
     return code
 
 
@@ -1642,6 +2198,22 @@ def _print_exit(code: int) -> None:
         "an unreadable file, an unresolvable follow_up_of, or a missing index)",
     }
     print(f"exit code {code} — {meanings[code]}")
+
+
+def _print_pacing(results: Sequence[CaseResult], *, mock_mode: bool = False) -> None:
+    """The run's measured token spend, so the wall time it took is explicable.
+
+    A silent pacer is indistinguishable from a hang: a run that took eleven minutes looks
+    broken unless the arithmetic that made it take eleven minutes is on the page. Under
+    ``MOCK_LLM=1`` the numbers the mock reports are scripted placeholders rather than a
+    provider's accounting, so nothing is printed: pacer and report stay inert together.
+    """
+
+    if mock_mode or not results or all(not (r.tokens[0] or r.tokens[1]) for r in results):
+        return
+    spent = sum(r.token_cost for r in results)
+    per_case = ", ".join(f"{r.case.case_id}={r.token_cost:,}" for r in results)
+    print(f"token spend         : {spent:,} total ({per_case})")
 
 
 def _json_report(
@@ -1682,6 +2254,7 @@ def _json_report(
                 "citations": r.citations,
                 "ranks": r.ranks,
                 "nodes": r.nodes,
+                "tokens": {"in": r.tokens[0], "out": r.tokens[1], "total": r.token_cost},
                 "latency_ms": round(r.latency_ms, 2),
                 "scoring": {
                     "retrieval_hit": r.retrieval_hit,
@@ -1840,13 +2413,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{case.follow_up_of!r}, which is not in the dataset",
             error_kind="dataset",
         )
+    # The pacer is built here, after the selection is known, because the daily gate is a
+    # pre-flight over the *requested* set: refusing a run is only honest if the projection
+    # is the whole run's cost rather than the first case's.
+    tpm_limit = _tpm_limit_from_env()
+    tpd_limit = _env_int("EVAL_TPD_LIMIT", DEFAULT_TPD_LIMIT)
+    pacer = _TokenPacer(
+        tpm_limit=tpm_limit,
+        tpd_limit=tpd_limit,
+        mock_mode=mock_mode,
+        allowed_today=_allowed_today_from_env(tpd_limit),
+        daily_gate=_daily_gate_enabled(),
+    )
+    projected = _projected_run_cost(ordered, _max_measured_cost(results))
+    _print_preflight(projected, pacer, ordered, quiet=args.quiet)
+    refusal = pacer.check_daily(projected)
+    if refusal:
+        # A refusal is a harness decision, not a case's finding, so it prints to stderr and
+        # takes the regression exit path: the run did not happen, and pretending it passed
+        # or failed would be a lie either way.
+        print(f"harness error: {refusal}", file=sys.stderr)
+        _print_exit(EXIT_REGRESSION)
+        return EXIT_REGRESSION
+
     total = len(ordered)
     for position, case in enumerate(ordered, start=1):
         chain = _follow_up_chain(report.cases, case)
-        result = _run_case(case, ctx, chain, results)
+        result = _run_case(case, ctx, chain, results, pacer=pacer)
         results[case.case_id] = result
         if not args.quiet:
-            _print_case(result, position, total)
+            _print_case(result, position, total, mock_mode=mock_mode)
 
     # Ancestors replayed for history are not scored: the aggregate covers the requested set.
     scored = [results[case.case_id] for case in requested]

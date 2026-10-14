@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -54,7 +55,11 @@ def _load_module() -> Any:
 harness = _load_module()
 
 
-def _case(case_id: str, expect: dict[str, Any] | None = None) -> Any:
+def _case(
+    case_id: str,
+    expect: dict[str, Any] | None = None,
+    follow_up_of: str | None = None,
+) -> Any:
     """One golden case, built in-process so no dataset file is read."""
 
     return harness.Case(
@@ -62,7 +67,7 @@ def _case(case_id: str, expect: dict[str, Any] | None = None) -> Any:
         question=f"question for {case_id}",
         expect=expect or {"kind": "figure"},
         tags=(),
-        follow_up_of=None,
+        follow_up_of=follow_up_of,
         line_no=1,
     )
 
@@ -993,3 +998,647 @@ def test_the_canary_still_names_the_adjacent_year_it_found() -> None:
     assert result.wrong_year is True
     assert FY2022_FIGURE in result.wrong_year_detail
     assert result.wrong_year_state == harness.WRONG_YEAR_CONTAMINATED
+
+
+# --- 7. the token-budget pacer ------------------------------------------------------
+#
+# The measured problem this section pins (``data/index``, 384-dim fastembed, Groq free
+# tier): one in-scope case costs ~10,038 tokens — P1 planner 2,038 (305 system + 766 catalog
+# JSON + 9 question + 128 schema) + P3 synthesis ~5,900 (23,448 chars of retrieved context,
+# irreducible — it carries the passages) + P5 verify ~2,100, with P2's rewrite adding ~600.
+# The per-minute ceiling is 8,000, so a *single* case is 125% of one minute's budget and the
+# ten-case golden set is ~100K tokens against a 200K/day allowance.
+#
+# ``scripts/eval_rag.py`` used to run the cases back-to-back with no pacing and no token
+# accounting at all, which on a per-minute ceiling makes a 429 a certainty rather than
+# unlucky: a real run logged ``Used 6537 / 8000`` against ``Requested 8087`` — a request
+# that physically cannot fit — plus three planner retries at 3,477 tokens each into the
+# same rolling window, and 8 of 10 cases degraded.
+#
+# Every test below drives the pacer through an injected clock and an injected sleeper, so
+# the pacing decision is asserted directly and never by how long the process was idle.
+# Nothing here touches the network, the graph, or the dataset on disk.
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand, so no real time is spent."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _pacer(
+    clock: _Clock,
+    slept: list[float],
+    *,
+    tpm_limit: int = 8000,
+    tpd_limit: int = 200_000,
+    allowed_today: int = 200_000,
+    mock_mode: bool = False,
+) -> Any:
+    """One pacer over the injected clock, recording every sleep it takes.
+
+    ``slept`` is the test's spy: an empty list after a gate is the assertion that no wait
+    was taken, and its contents are the wait that was. Every parameter the real harness
+    resolves from the environment is passed explicitly here, so a test names the ceiling it
+    is proving rather than inheriting whatever the host has set.
+    """
+
+    return harness._TokenPacer(
+        tpm_limit=tpm_limit,
+        tpd_limit=tpd_limit,
+        allowed_today=allowed_today,
+        mock_mode=mock_mode,
+        now=clock,
+        sleep=slept.append,
+    )
+
+
+def _cost(costs: Sequence[int]) -> Any:
+    """A results mapping of prior cases carrying ``token_cost``, as a sweep has measured."""
+
+    return {
+        f"prior{index}": harness.CaseResult(
+            case=_case(f"prior{index}"),
+            tokens=(cost, 0),
+        )
+        for index, cost in enumerate(costs)
+    }
+
+
+# --- 7a. a case that fits is dispatched immediately ----------------------------------
+
+
+def test_a_case_that_fits_the_window_dispatches_with_no_wait() -> None:
+    """The common answer, and the one that keeps a paced run from being a slow run.
+
+    The first case of a run has no measured prior, so it projects zero and dispatches. A
+    later case whose projection fits the empty window does the same.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    # No prior case: nothing measured to project from.
+    assert pacer.projected_cost({}) == 0
+    assert pacer.gate(pacer.projected_cost({}), label="(before q01)") == 0.0
+    assert slept == []
+
+    # With a prior case under the ceiling, the next one still fits.
+    prior = _cost([7_000])
+    assert pacer.projected_cost(prior) == 7_000
+    clock.advance(30.0)  # still inside the rolling minute
+    assert pacer.gate(pacer.projected_cost(prior), label="(before q02)") == 0.0
+    assert slept == []
+
+
+def test_a_case_whose_projection_fits_is_not_made_to_wait_on_a_budget_it_is_under() -> None:
+    """A spent window that has already rolled out is not a window at all.
+
+    The per-minute limit is *rolling*, so spend older than the window's own span must be
+    forgotten. Without this, every case in a ten-case sweep would wait for the cases before
+    it and a full run would take over two hours.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+    prior = _cost([10_038])  # over the ceiling on its own, but in a *future* minute
+
+    pacer.record(10_038)
+    clock.advance(61.0)  # the window that stamped it has rolled out
+    assert pacer.gate(pacer.projected_cost(prior), label="(before q02)") == 0.0
+    assert slept == []
+
+
+# --- 7b. a case that would overshoot waits for the window to clear --------------------
+
+
+def test_a_case_that_would_overshoot_the_window_waits_before_dispatching() -> None:
+    """The measured regression: 6,537 of 8,000 already used, 8,087 more requested.
+
+    The projected case cannot fit, so the pacer sleeps until the window's oldest entries
+    have cleared — on the injected clock, so the wait is asserted rather than endured.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    # A prior case that spent 6,000 tokens, still inside the rolling minute.
+    pacer.record(6_000)
+    clock.advance(10.0)
+
+    waited = pacer.gate(6_500, label="(before q03)")
+    assert waited > 0.0
+    assert slept, "an overshooting projection must sleep before it dispatches"
+    assert slept[0] == waited
+
+    # The wait is the oldest entry's own expiry: stamped at t=0, clears at t=60, now t=10.
+    assert slept[0] == 50.0
+
+
+def test_the_wait_it_takes_is_the_one_that_makes_room_not_one_more_second() -> None:
+    """The sleep is the exact span the window needs, so the run is not slower than the
+    ceiling forces. It is a whole second, because a fractional wake-up would arrive while
+    the window is still full and dispatch a request the provider has already refused.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    pacer.record(5_000)
+    clock.advance(59.5)  # 0.5s of the entry left, but a fraction is not a clearing
+    assert pacer.gate(4_000, label="(before q04)") == 1.0
+    assert slept == [1.0]
+
+
+def test_the_window_forgets_old_spend_so_a_long_run_cannot_deadlock() -> None:
+    """A window that never drains would make every case after the first wait forever.
+
+    The rolling window is a list of stamps carrying the provider's own span, so a case's
+    spend leaves it one minute after it was paid. Both halves are asserted: the window's
+    contents, and the decision they produce — a projection that overshoots at the time
+    fitting a minute later.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    pacer.record(7_500)
+    clock.advance(5.0)
+    assert pacer._minutes_window() == [(0.0, 7_500)], "the spend is inside the window"
+    assert pacer.gate(5_000, label="(before q05)") > 0.0, "it overshoots while still in window"
+
+    clock.advance(56.0)  # the entry is 61s old: the window's own span has passed
+    assert pacer._minutes_window() == [], "and the spend has rolled out of the window"
+    assert pacer.gate(5_000, label="(before q06)") == 0.0, "so the next case fits"
+    assert slept and slept[-1] > 0.0, "and the wait it did take was on the earlier gate"
+
+
+def test_the_same_projection_overshoots_twice_before_the_window_clears() -> None:
+    """Independent cases each pay their own debt: the second waits again after the first.
+
+    A pacer that waited once and then dispatched freely would let the very next request
+    overshoot — the pacing would be a token gesture rather than a budget.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    pacer.record(7_000)
+    clock.advance(1.0)
+    assert pacer.gate(6_000, label="(before q07)") > 0.0
+    first = len(slept)
+
+    # The wait it took is the sleep, so advancing the clock by it is the case being run.
+    clock.advance(float(slept[-1]))
+    # A second case's own spend re-fills the window while the first entry is still in it.
+    pacer.record(7_500)
+    assert pacer.gate(6_000, label="(before q08)") > 0.0, "the window is full again"
+    assert len(slept) == first + 1
+
+
+# --- 7b2. the wiring, end to end, without a graph ------------------------------------
+#
+# The three halves of the fix are wired inside ``_run_case``: the envelope's ``node_trace``
+# becomes ``CaseResult.tokens``, ``pacer.projected_cost`` reads that back, and the finished
+# case's real cost is stamped into the window. Proving that chain needs a graph, so this
+# test stubs ``src.chains.graph.invoke`` — the one seam ``_run_case`` imports — and runs the
+# real harness over a stub envelope carrying the real trace shape. No network, no key.
+
+
+class _StubInvoke:
+    """A stand-in for ``src.chains.graph.invoke`` returning a scripted envelope.
+
+    Each call records what it was asked, so the test can assert the pacer ran *before* the
+    case was dispatched rather than merely at some point near it.
+    """
+
+    def __init__(self, cost: int) -> None:
+        self.cost = cost
+        self.calls: list[str] = []
+
+    def __call__(
+        self,
+        question: str,
+        *,
+        history: object = None,
+        params: object = None,
+        doc_catalog: object = None,
+    ) -> Any:
+        self.calls.append(question)
+
+        class _Envelope:
+            # A scripted refusal envelope: the shape a fiscal-year-gated case produces, with
+            # a trace carrying the counts the harness is supposed to pick up.
+            answer_md = "**Refused** — the documents cover FY2021-FY2023."
+            plan = None
+            refusal_reason = "time_period"
+            grounded = True
+            planner_degraded = False
+            citations: ClassVar[list[Any]] = []
+            retrieval_debug: ClassVar[list[Any]] = []
+            node_trace: ClassVar[list[Any]] = []
+
+        _Envelope.node_trace = [
+            {"node": "analyze_question", "tokens_in": self.cost, "tokens_out": 31},
+            {"node": "synthesize_answer", "tokens_in": self.cost, "tokens_out": 19},
+        ]
+        return _Envelope()
+
+
+def test_the_trace_becomes_the_next_cases_projection_and_the_windows_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole chain in one run: trace -> tokens -> projection -> wait -> the next case.
+
+    ``q02`` runs first for real (against the stub), costs what the trace says, and the
+    window fills. ``q03``'s projection is read from that measured truth, overshoots the
+    per-minute ceiling, and waits on the injected clock before the stub is called a second
+    time — so a paced case is paced by what a real case really cost, and not by a guess.
+    """
+
+    import src.chains.graph as graph_module
+
+    clock = _Clock()
+    slept: list[float] = []
+    stub = _StubInvoke(3_000)  # 6,050 per case: two of them exceed 8,000, one does not
+    monkeypatch.setattr(graph_module, "invoke", stub, raising=True)
+
+    ctx = harness._RunContext(
+        docs=[],
+        mock_mode=False,
+        index_dir=Path("unused"),
+        scopes=harness._full_scopes(),
+    )
+    pacer = _pacer(clock, slept)
+
+    results: dict[str, Any] = {}
+    first = harness._run_case(_case("q02"), ctx, [], results, pacer=pacer)
+    assert first.tokens == (6_000, 50), "the envelope's own counts land in the result"
+    assert first.token_cost == 6_050
+    # ``main`` is what files a finished case, so the projection's prior is read from exactly
+    # the store the sweep itself keeps.
+    results[first.case.case_id] = first
+    assert pacer._minutes_window() == [(0.0, 6_050)]
+    assert pacer.projected_cost(results) == 6_050, "the projection is the measured cost"
+
+    clock.advance(1.0)
+    second = harness._run_case(_case("q03"), ctx, [], results, pacer=pacer)
+
+    assert second.tokens == (6_000, 50)
+    assert len(slept) == 1, "the second case waited before it dispatched"
+    assert slept[0] == 59.0, "and the wait cleared the window the first case filled"
+    assert stub.calls == [first.case.question, second.case.question]
+    assert pacer.waits == [59.0]
+
+
+def test_an_unpaced_run_is_unchanged_by_the_pacer_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pacer is additive: the same case run without one produces the same result.
+
+    Pacing is infrastructure, so it must not change what the harness measures — asserted
+    here so a future change cannot quietly make the run's measurement depend on its pacing.
+    """
+
+    import src.chains.graph as graph_module
+
+    stub = _StubInvoke(1_000)
+    monkeypatch.setattr(graph_module, "invoke", stub, raising=True)
+
+    ctx = harness._RunContext(
+        docs=[],
+        mock_mode=False,
+        index_dir=Path("unused"),
+        scopes=harness._full_scopes(),
+    )
+    case = _case("q09", {"kind": "refusal", "missing_aspect": "time_period"})
+
+    clock = _Clock()
+    paced = harness._run_case(case, ctx, [], {}, pacer=_pacer(clock, []))
+    unpaced = harness._run_case(case, ctx, [], {})
+
+    assert paced.tokens == unpaced.tokens
+    assert paced.answer_md == unpaced.answer_md
+    assert paced.refusal_reason == unpaced.refusal_reason
+    assert paced.plan_ok == unpaced.plan_ok
+
+
+# --- 7c. the pacer is inert under MOCK_LLM=1 ----------------------------------------
+
+
+def test_the_pacer_is_inert_under_mock_llm() -> None:
+    """Zero-config for the offline path: no projection, no window, no sleep, no state.
+
+    The mock run must stay as fast and deterministic as it was, so the pacer holds no
+    budget state at all — asserted by trying every path a paced run would take and watching
+    each one report nothing to do.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept, mock_mode=True)
+
+    # A projection that *would* wait on a real run, so "no wait" means inert, not lucky.
+    prior = _cost([6_000])
+    assert pacer.projected_cost(prior) == 0
+    assert pacer.gate(6_000, label="(before q01)") == 0.0
+
+    # The window is never populated, so a mock run holds no budget state whatsoever.
+    pacer.record(6_000)
+    assert pacer.gate(6_000, label="(before q02)") == 0.0
+    assert pacer.waits == []
+    assert slept == [], "no sleep of any length, on any path"
+    assert pacer._minutes_window() == []
+    assert pacer.check_daily(999_999) == ""
+
+    # And even with a window that *would* overshoot, the mock path never waits: the inert
+    # claim is about the mock run, not about a window that happens to be empty.
+    pacer.tpm_limit = 4000
+    pacer._spend.append((clock(), 7_500))  # already over the ceiling, on a real run
+    assert pacer.gate(3_000, label="(before q03)") == 0.0
+    assert slept == []
+
+
+# --- 7d. the ceilings come from the environment ------------------------------------
+
+
+def test_eval_tpm_limit_overrides_the_per_minute_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paid tier or another provider raises the ceiling without editing the harness."""
+
+    assert harness._tpm_limit_from_env() == harness.DEFAULT_TPM_LIMIT
+    monkeypatch.setenv("EVAL_TPM_LIMIT", "30000")
+    assert harness._tpm_limit_from_env() == 30000
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept, tpm_limit=harness._tpm_limit_from_env())
+    pacer.record(10_038)
+    assert pacer.gate(10_038, label="(before q02)") == 0.0, "fits in the raised window"
+    assert slept == []
+
+
+def test_an_unusable_ceiling_falls_back_to_the_default_rather_than_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank, a typo or a negative must not become a zero ceiling, which would make every
+    projection overshoot and every run wait on a window that can never clear."""
+
+    for bad in ("", "  ", "eight-thousand", "0", "-1"):
+        monkeypatch.delenv("EVAL_TPM_LIMIT", raising=False)
+        if bad:
+            monkeypatch.setenv("EVAL_TPM_LIMIT", bad)
+        assert harness._tpm_limit_from_env() == harness.DEFAULT_TPM_LIMIT, bad
+
+
+# --- 7e. the daily ceiling is a pre-flight gate, not a throttle ----------------------
+
+
+def test_a_run_that_would_spend_past_the_days_share_is_refused_before_it_starts() -> None:
+    """A key that has already spent part of its day cannot afford a full golden sweep.
+
+    ~81K tokens for the requested set is 40% of a fresh 200K/day allowance, so a full set
+    starts. The same set on a key with only 50K left — one full run already spent — must be
+    refused instead: a daily ceiling cannot be slept off, so the only honest choices are to
+    spend knowingly or not to spend at all. The refusal names the arithmetic and the escape
+    hatch.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept, allowed_today=50_000)
+
+    projected = harness._projected_run_cost(_full_set())
+    assert projected > 50_000, "the fixture must be a genuinely short-quota key"
+
+    refusal = pacer.check_daily(projected)
+    assert refusal, "a run the day cannot pay for must be refused, not merely slowed down"
+    assert "50,000" in refusal and "tokens short" in refusal
+    assert harness.TPD_OVERRIDE_HINT in refusal
+
+
+def test_a_run_inside_the_days_share_starts() -> None:
+    """The gate is not a refusal machine: a run that fits the day's share runs."""
+
+    clock = _Clock()
+    pacer = _pacer(clock, [], allowed_today=200_000)
+    assert pacer.check_daily(harness._projected_run_cost(_full_set())) == ""
+
+    # A single in-scope case is ~10K, which is a fifth of the day and plainly affordable.
+    assert pacer.check_daily(harness._projected_run_cost([_case("q01")])) == ""
+
+
+def test_eval_tpd_override_disables_the_daily_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented escape hatch: a user who has decided the quota is worth spending."""
+
+    clock = _Clock()
+    pacer = _pacer(clock, [])
+
+    assert pacer.check_daily(99_000_000) != ""
+    pacer.daily_gate = harness._daily_gate_enabled()
+    monkeypatch.setenv("EVAL_TPD_OVERRIDE", "1")
+    assert harness._daily_gate_enabled() is False
+    pacer.daily_gate = harness._daily_gate_enabled()
+    assert pacer.check_daily(99_000_000) == ""
+
+
+def test_the_preflight_prints_the_projection_and_the_fraction_of_the_day(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pacer that spends half a day without a word is still a footgun.
+
+    The projection, the ceiling it is measured against and the fraction it consumes are all
+    on the page before the first case dispatches.
+    """
+
+    clock = _Clock()
+    pacer = _pacer(clock, [])
+    projected = harness._projected_run_cost(_full_set())
+    # Eight answering cases at the canonical cost, plus the one follow-up's P2 rewrite.
+    assert projected == 8 * harness.CANONICAL_CASE_TOKENS + harness.FOLLOW_UP_CASE_TOKENS
+
+    harness._print_preflight(projected, pacer, list(_full_set()))
+    printed = capsys.readouterr().out
+    assert "tpm ceiling" in printed and "8,000" in printed
+    assert f"{projected:,}" in printed
+    assert "% of the day" in printed
+
+
+# --- 7f. pacing never turns a rate limit into a pass --------------------------------
+
+
+def test_a_429_that_lands_after_pacing_still_degrades_into_the_unmeasured_path() -> None:
+    """The pacers's whole honest claim: fewer 429s, never a fake pass.
+
+    Pacing reduces infrastructure failures. It must not convert a real one into a pass and
+    it must not hide one, so a 429 that arrives anyway still takes the degradation path
+    exactly as it did before the pacer existed.
+    """
+
+    case = _case("q02", {"kind": "figure", "must_appear": ["$211,915"]})
+    result = harness.CaseResult(
+        case=case,
+        answer_md="**Refused** — outside the scope of the documents.",
+        refusal_reason="unspecified",
+        plan_kind="out_of_scope",
+        missing_aspect=None,
+        degraded_reason=RATE_LIMITED_REASON,
+        tokens=(3_477, 0),  # the planner retry's own cost, counted even though it 429'd
+    )
+    harness._score_case(case, result, harness._full_scopes())
+
+    # Not a failure, and emphatically not a pass: unmeasured, and it drives the exit code.
+    assert result.infrastructure_degraded is True
+    assert result.failed is False
+    assert result.refusal_ok is None and result.figure_ok is None
+
+    verdicts = harness._verdicts([result])
+    code, reason = harness._exit_code([result], verdicts)
+    assert code == harness.EXIT_REGRESSION
+    assert "planner could not run" in reason
+    assert verdicts["figure_match"] == "NA", "a 429 is never scored as an answer"
+
+
+def test_the_pacer_does_not_quieten_the_canary() -> None:
+    """Pacing is about provider arithmetic, not about what the answer is judged on.
+
+    The wrong-year canary is lexical, so it is unaffected by any pacing decision — asserted
+    here so nobody mistakes "fewer 429s" for "weaker gates".
+    """
+
+    case = _canary_case("q03")
+    result = harness.CaseResult(case=case, answer_md="Revenue was $198,270 million in FY2023 [1].")
+    harness._score_case(case, result, harness._full_scopes())
+
+    assert result.wrong_year is True
+    assert harness._exit_code([result], harness._verdicts([result]))[0] == harness.EXIT_REGRESSION
+
+
+# --- 7g. the token counts come from the envelope's own trace ------------------------
+
+
+def test_the_traces_token_counts_are_read_from_the_run_itself() -> None:
+    """The pacer's projection is measured truth, never an estimate from prompt length.
+
+    ``@trace_node`` records ``tokens_in``/``tokens_out`` per node from the gateway's own
+    accounting, so the harness sums those and nothing else. A trace with missing counts
+    (a node that made no LLM call) contributes zero rather than a guess.
+    """
+
+    events = [
+        {"node": "analyze_question", "tokens_in": 2038, "tokens_out": 411},
+        {"node": "hybrid_retrieve"},  # no LLM call: nothing to count
+        {"node": "synthesize_answer", "tokens_in": 5900, "tokens_out": 308},
+        {"node": "groundedness_check", "tokens_in": 2100, "tokens_out": 1},
+    ]
+    assert harness._trace_tokens(events) == (10_038, 720)
+    assert sum(harness._trace_tokens(events)) == 10_758
+
+    # Attribute-shaped events count the same way, because the envelope carries dataclasses.
+    class _Event:
+        def __init__(self, node: str, tokens_in: object = None, tokens_out: object = None) -> None:
+            self.node = node
+            self.tokens_in = tokens_in
+            self.tokens_out = tokens_out
+
+    shaped = [_Event("analyze_question", 2038, 411), _Event("synthesize_answer", 5900, 308)]
+    assert harness._trace_tokens(shaped) == (7938, 719)
+
+    # An empty, absent or untyped trace is zero, never a crash into a golden case's run.
+    assert harness._trace_tokens([]) == (0, 0)
+    assert harness._trace_tokens(None) == (0, 0)
+
+
+def test_the_projection_is_the_most_expensive_prior_not_the_average() -> None:
+    """A cheap case must not lower the projection below a case that would overshoot.
+
+    The ceiling is a per-request ceiling as well as a rolling one, so averaging a 5,000-token
+    case with a 8,100-token one under-predicts the second and dispatches a request the
+    provider then has to refuse.
+    """
+
+    clock = _Clock()
+    pacer = _pacer(clock, [])
+    assert pacer.projected_cost(_cost([5_000, 8_100])) == 8_100
+    assert pacer.projected_cost(_cost([100, 5_000])) == 5_000
+
+
+def test_a_projection_larger_than_the_window_runs_and_lets_the_provider_decide() -> None:
+    """A request bigger than the whole minute cannot be paced into it, and says so.
+
+    Guessing badly must never wedge the harness: the pacer declines to sleep on a request
+    no sleep can make fit, prints the arithmetic, and leaves the 429 to the reactive path
+    the gateway already has.
+    """
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept, tpm_limit=8_000)
+
+    projection = pacer._project(20_000)
+    assert projection.wait_seconds == 0.0
+    assert "cannot fit" in projection.reason or "no wait" in projection.reason
+    assert slept == []
+
+
+def test_a_case_that_costs_nothing_is_never_paced() -> None:
+    """A refusal case gated at the fiscal-year boundary never reaches a provider, and a
+    mock case costs nothing at all: nothing to project, nothing to wait for."""
+
+    clock = _Clock()
+    slept: list[float] = []
+    pacer = _pacer(clock, slept)
+
+    assert pacer.projected_cost(_cost([0, 0])) == 0
+    assert pacer.gate(0, label="(before q09)") == 0.0
+    assert slept == []
+
+
+def test_the_projected_run_cost_counts_refusal_cases_as_free() -> None:
+    """ADR-010's fiscal-year gate refuses before any provider is called, so a refusal case
+    contributes nothing to a run's projected spend.
+    """
+
+    in_scope = _case("q01")
+    refusal = _case("q09", {"kind": "refusal", "missing_aspect": "time_period"})
+    assert harness._projected_run_cost([in_scope, refusal]) == harness.CANONICAL_CASE_TOKENS
+
+
+def _full_set() -> list[Any]:
+    """The golden set's shape in cost terms: eight answering cases (``q01``-``q08``) plus the
+    ``q09`` refusal the fiscal-year gate turns away before any provider call. Only ``q08`` is
+    a follow-up, so exactly one case carries P2's rewrite on top of the answer.
+    """
+
+    cases = [
+        _case("q01"),
+        _case("q02"),
+        _case("q03"),
+        _case("q04"),
+        _case("q05"),
+        _case("q06"),
+        _case("q07"),
+        _case(
+            "q08",
+            {"kind": "entity_figure"},
+            follow_up_of="q07",
+        ),
+        _case("q09", {"kind": "refusal", "missing_aspect": "time_period"}),
+    ]
+    return cases
