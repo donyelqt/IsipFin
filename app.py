@@ -28,6 +28,7 @@ from src.chains.graph import invoke
 from src.chains.state import AnswerEnvelope, DocSummary, Turn
 from src.components import chat, errors, sidebar, theme, upload
 from src.components.debug_panel import render_debug_panel
+from src.store.db import StoreError
 from src.store.sessions import Message, SessionStore
 from src.utils.settings import load_env
 
@@ -149,12 +150,37 @@ def _record(
     session_id: str | None,
     question: str,
     envelope: AnswerEnvelope,
-) -> None:
-    """Persist the question, the answer, its citations and its node trace."""
+) -> tuple[bool, StoreError | None]:
+    """Persist the question, the answer, its citations and its node trace.
+
+    Returns ``(question_landed, failure)``. ``question_landed`` is ``True`` when the
+    user's question reached the ``turns`` table — a fact the caller needs, because
+    ``record_message`` writes its turn and its message in one transaction, so a store
+    can absolutely commit the question and then refuse the answer; the transcript would
+    then already show that question, and drawing it again would show one ask as two.
+
+    ``failure`` is ``None`` when the whole turn landed, otherwise the store failure to
+    tell the user about. Persistence is best-effort by contract — a read-only database,
+    a locked file, a corrupt page — so a failing store is a *degraded* app, never a
+    crashed one, and the failure is reported rather than raised into the render.
+    Reporting it is what lets the caller keep the answer it already produced: losing a
+    *turn* must never cost the *answer* that was computed (ADR-007's "no code path
+    renders an empty answer", reached from the direction where the answer existed and
+    was discarded).
+
+    ``store is None`` or a missing session counts as "nothing to persist", not a
+    failure: that is the no-store path the caller already handles by carrying the
+    envelope itself.
+    """
+
     if store is None or not session_id:
-        return
+        return False, None
     try:
         store.append_turns(session_id, [{"role": "user", "content": question}])
+    except Exception as exc:
+        logger.warning("persisting question failed: %s", exc)
+        return False, _as_store_failure(exc)
+    try:
         store.record_message(
             session_id,
             question,
@@ -173,8 +199,27 @@ def _record(
                 for c in envelope.citations
             ],
         )
+        return True, None
     except Exception as exc:
-        logger.warning("persisting turn failed: %s", exc)
+        logger.warning("recording answer failed: %s", exc)
+        return True, _as_store_failure(exc)
+
+
+def _as_store_failure(exc: Exception) -> StoreError:
+    """A store failure the taxonomy recognises, whatever the driver raised.
+
+    ``sqlite3``'s own types (``OperationalError`` on a read-only file or a locked
+    database, ``DatabaseError`` on a corrupt page) are rebound to
+    :class:`~src.store.db.StoreError`, the base class the classifier maps to the
+    store's own banner. The original is kept as the cause, so the log still carries
+    the driver's own message and the banner never has to.
+    """
+
+    if isinstance(exc, StoreError):
+        return exc
+    failure = StoreError(str(exc))
+    failure.__cause__ = exc
+    return failure
 
 
 def _footer_text(rail_ready: bool, docs: int) -> str:
@@ -294,16 +339,36 @@ def _render_chat_view(rail: Any, store: SessionStore | None) -> None:
         errors.render_error(exc, on_retry=view.retryable)
         return
 
-    # Persist first, then rerun. With a store the transcript renders the turn from
-    # the database, so holding the envelope too would draw it twice; without a
-    # store there is nothing to re-read, so the envelope carries it for one rerun.
+    # Persist first. With a store the transcript renders the turn from the database, so
+    # the rerun is what puts it on the canvas; without a store the envelope is carried
+    # for one rerun and drawn from state.
     st.session_state[_QUESTION_KEY] = ""
     st.session_state[_LAST_KEY] = envelope
     st.session_state[_LAST_SESSION_KEY] = session_id
+    question_landed = False
+    store_failure = None
     if store is not None and session_id:
-        _record(store, session_id, question, envelope)
+        question_landed, store_failure = _record(store, session_id, question, envelope)
     else:
         st.session_state[_ANSWER_KEY] = envelope
+
+    if store_failure is not None:
+        # The store refused the turn, so the rerun has no row to re-read and would
+        # render an empty canvas — the defect this path exists to close. The turn is
+        # drawn now, from the envelope the graph produced, and the banner says
+        # persistence failed, so the gap in history is named rather than discovered
+        # later by a user wondering where their question went.
+        logger.warning("turn not persisted for %s: %s", session_id, store_failure)
+        if not question_landed:
+            # A committed question is a transcript row, so it is only drawn from here
+            # for a store that took neither row — otherwise one ask is two questions.
+            with st.chat_message(name="user"):
+                st.markdown(question)
+        chat.render_answer(envelope, doc_names=doc_labels)
+        errors.render_error(store_failure)
+        chat.render_footer_note(_footer_text(rail.index_ready, rail.doc_count))
+        return
+
     st.rerun()
 
 
