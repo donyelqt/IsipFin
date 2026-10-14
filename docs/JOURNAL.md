@@ -237,14 +237,19 @@ comparative is attributed to FY2022. Aggregate: `wrong_year_contamination 0/3+0 
 two claims were *trimmed* downstream for `figure_not_in_span` — that is the mock's arbitrary
 citation mapping, not a year error; §7 explains it.)
 
-**Prompt iteration record: none — P3 is at v1.0.0, changelog "initial: citation constraint +
-year-aware extraction contract."** There is no earlier version whose failure produced this one, and
-I am not going to invent one. The reason is a design choice rather than luck: ADR-010 put the year
+**Prompt iteration record: P3 is at 1.0.1.** Its changelog reads "1.0.1 — new grounding rule: a
+figure quoted from a multi-period context block must name its period in the sentence itself
+(verified claim \"$ 211,915 million [3]\" was trimmed as unsupported because the income-statement
+block spans FY2023–FY2021 and the sentence named no period)" over "1.0.0 — initial: citation
+constraint + year-aware extraction contract." There is no earlier version of the *year* rule whose
+failure produced this one, and the reason is a design choice rather than luck: ADR-010 put the year
 rule in the *symbolic* layer first — the deterministic pre-pass in `src/chains/checks.py` rejects a
 period-label mismatch without any model call — so the prompt's rule is a second, independent net
 over a rule that is already testable in isolation. The evidence that the design holds is the canary
 table above and `tests/test_checks.py`'s FY2024-claimed-as-FY2023 case, not a diff in
-`docs/prompts/`. §6 addresses the "zero iteration looks like a red flag" objection directly.
+`docs/prompts/`. The v1.0.1 rule 3a (name the period in the sentence that carries the figure) came
+from the other layer — a fully *grounded* claim naming no period, which the pre-pass could not
+settle because it had no period to contradict — and §6 quotes that before/after exactly.
 
 ### 5.2 Follow-ups without contaminating answers
 
@@ -260,7 +265,7 @@ dead turn.
 
 **Measured result — golden QA, the two follow-up cases.** The harness replays each prior turn pair
 as real `Turn` objects, so this exercises the actual disambiguation contract (`cited_pages` +
-`entities` from the previous *answer*, per P2 v1.0.0) rather than a transcript string:
+`entities` from the previous *answer*, per P2's history contract) rather than a transcript string:
 
 | Case | History replayed | Retrieval outcome | Verdict |
 |---|---|---|---|
@@ -285,14 +290,59 @@ mode, and it is why the follow-up path's *answer* quality needs a keyed run to s
 Each prompt file carries its own version header and iteration notes; the library protocol is
 `docs/prompts/README.md`.
 
-**The record: all five prompts are at v1.0.0 and no prompt was revised.** Their changelogs read
-`1.0.0 — initial` (`P1` kind/sub_queries/required_sections/missing_aspect; `P2` history window +
-`cited_pages` disambiguation; `P3` citation constraint + year-aware extraction contract; `P5`
-claim-level span verification). I have no earlier version's failing output to quote, so this
-section carries no before/after prompt diff — producing one would mean inventing a failure, and an
-invented prompt failure is worse than an absent one.
+**The record: every prompt has been revised, and every bump is in the file's own changelog.**
+The versions on disk:
 
-**Why there is no prompt diff, and why that is a design outcome rather than a red flag.** The
+| Asset | Version | Changelog motivation (verbatim from the file) |
+|---|---|---|
+| `P1` `query-analysis.md` | 1.0.1 | "1.0.1 — header correction: the Output schema row named a module that does not exist; it now names `QUERY_PLAN_SCHEMA` in `src/chains/nodes/analyze.py`, where the schema is declared inline" / "1.0.0 — initial: kind, sub_queries, required_sections, missing_aspect" |
+| `P2` `follow-up-contextualization.md` | 1.0.2 | "1.0.2 — added metric-fidelity rule: when the previous answer carried figures, the rewrite must keep the same metric family as those figures (dollar margin is a different question from percentage margin) and must not switch units or scope — the follow-up's figures are what the answer is scored on, so a rewrite that silently changes what is being asked drops them" |
+| `P3` `answer-synthesis-with-citations.md` | 1.0.1 | "1.0.1 — new grounding rule: a figure quoted from a multi-period context block must name its period in the sentence itself (verified claim \"$ 211,915 million [3]\" was trimmed as unsupported because the income-statement block spans FY2023–FY2021 and the sentence named no period)" |
+| `P4` `table-and-number-formatting.md` | 1.0.1 | "1.0.1 — corrected rule 1's citation placement: \"a source note under the table lists the [n] markers\" prescribed a placement the verifier's `split_units` cannot read (the table block ends before the note, so the rows inherit no marker and every row is trimmed as `figure_not_in_span`), and it contradicted rule 4, which already prescribed the placement that works — a marker in each row's label cell, or per-cell. Motivated by golden case q03 `Compare revenue and operating income between FY2023 and FY2022`: the real run's two table rows were both trimmed, leaving `figure_ok: False` and the answer `&#124;&#124;(unsupported claim removed)&#124;&#124;`" / "1.0.0 — initial" |
+| `P5` `summarization-and-verification.md` | 1.0.2 | "1.0.2 — header correction: the \"You receive\" line claimed the node ships P5 the whole retrieved context, which is no longer true — the node now sends only the blocks the undecided claims cite (all of them when none cites anything), because a claim is judged against the span it cites and prefill for the rest is dead weight" / "1.0.1 — header correction: the Output schema row named a module that does not exist; it now names `GROUNDING_SCHEMA` in `src/chains/nodes/verify.py`, where the schema is declared inline" / "1.0.0 — initial: claim-level span verification" |
+
+Three of them — P2, P3 and P4 — carry a body change; P1's and P5's bumps are header corrections,
+and their changelogs say so themselves. The protocol in `docs/prompts/README.md` is what makes this
+history recoverable: one change per version, `patch` for a wording clarification, and every bump
+evidence-gated. Only P3 and P4 record a scoring result, and those two are the ones worth a
+before/after. Both are quoted exactly.
+
+**P3, before v1.0.1 (rule 3 only):** "If the question names a fiscal period, quote the figure from
+the column labeled with that period. The report contains multiple fiscal years in adjacent table
+columns; reading the wrong column is the single worst failure you can produce." — a model that read
+the right column could still emit `$ 211,915 million [3]`, and the verifier trimmed it because the
+cited income statement prints FY2023, FY2022 and FY2021 side by side and the claim named no period.
+The pre-trim result is quoted from P3's own changelog, which recorded it as a live provider run:
+`(unsupported claim removed)`, `grounded=False`, `citations=0`. **P3 after v1.0.1 (rule 3a):** "When
+a figure comes from a context block that spans several periods (an income statement printing
+FY2023, FY2022 and FY2021 side by side), the sentence that carries the figure MUST name that
+period: \"$ 211,915 million [3]\" is trimmed as unverifiable because the block shows several periods
+and the claim names none, whereas \"Revenue was $ 211,915 million in FY2023 [3]\" survives
+verification. The period belongs to the claim itself, never to a preamble or a following sentence."
+The same case measured after the fix, from the NVIDIA run's own log: q01 took **10626.8 ms** and
+answered `Microsoft's revenue in FY2023 was $211,915 million [2].` — `grounded : True citations: 1`,
+the figure surviving verification, which is the evidence the rule was needed and that it worked.
+
+**P4, before v1.0.1 (rule 1):** "A source note under the table lists the [n] markers for the rows
+it covers" — a placement `checks.split_units` cannot read: the table block ends before the note, so
+its rows inherit no marker and each is trimmed as `figure_not_in_span`. The pre-trim result is
+quoted from P4's own changelog, which recorded it case by case: golden case q03
+`Compare revenue and operating income between FY2023 and FY2022`, both body rows trimmed,
+`figure_ok: False`, the answer rendering
+`||(unsupported claim removed)||`. **P4 after v1.0.1 (rule 1):** "Put the
+[n] marker in the table itself — in each row's label cell when one block supports the whole row,
+per-cell when the cells come from different blocks (rule 4). A source note listed *below* the table
+does not cite the rows: the verifier reads a table's markers from inside the table, so a note
+underneath leaves every row uncited and each row is trimmed as an unsupported claim." The same case
+measured after the fix, from the NVIDIA run's own log: `expected : $211,915 FOUND` and
+`expected : $88,523 FOUND`, the answer rendering as
+`| Revenue [1] | $ 211,915 | $ 198,270 |` and `| Operating Income [1] | $ 88,523 | $ 83,383 |` —
+markers inside the rows, both figures surviving.
+P1 and P5's header corrections carry no scoring result, only a metadata one, so no before/after is
+quoted for them: claiming one would mean inventing a failure, and an invented prompt failure is
+worse than an absent one.
+
+**Why the prompt stayed mostly quiet, and why that is a design outcome rather than a red flag.** The
 template's warning assumes the prompt is the only place a rule lives. Here the riskiest rules were
 deliberately placed *outside* the prose first, so a deterministic test could hold them:
 
@@ -319,7 +369,9 @@ just not as prompt diffs, because the rework landed in the layer that was wrong:
 
 That is the shape of the iteration this project actually has: measured failures → the layer that
 was wrong → the fix, with the measurement kept. A reviewer looking for evidence of refinement will
-find it in §3b, §3c and §7 rather than in `docs/prompts/`.
+find it in §3b, §3c and §7 — and, now, in `docs/prompts/` itself: two of the five bumps were
+driven by a keyed run's own trimmed answer, and their changelogs name the case and the result, so
+the history is recoverable from the file rather than from memory.
 
 ## 7. Measurements
 
@@ -332,8 +384,8 @@ and say why, rather than carrying an invented figure.
 | Corpus pages / sections | 85 pages, 15 sections, 1 document | `data/index/docs.jsonl`; the rail's workspace card |
 | Child / parent chunk counts | 398 child chunks across 102 distinct parents | `chunks.jsonl` |
 | Index artifacts on disk | real 384-dim index: `chunks.jsonl` 1.79 MB + `bm25.pkl` 402 KB + `docs.jsonl` 5.2 KB = 2.7 MiB | `data/index/faiss/meta.json` = `{"dim": 384, "count": 398}` |
-| **Answer latency, simple question (real provider)** | **18.8 s** total — analyze 7404, synthesize 10771, retrieve 584, verify 6 | live `node_trace`, keyed run |
-| Answer latency, simple question (mock) | 88.4 ms total — retrieve 64.0, synthesize 14.0, verify 5.9, analyze 4.5 | live `node_trace`, `MOCK_LLM=1` |
+| **Answer latency, simple question (real provider)** | **10,626.8 ms** total — 9,638 tokens in / 779 out (10,417 total, from that run's `node_trace`); per-node timings are not printed as a split in the log, so the node-level breakdown of an earlier measurement is **not carried forward** rather than restated from it | `.evalwork/nvidia-verify.log`, case q01 (`latency : 10626.8 ms`, `grounded : True citations: 1 nodes: 5`); produced by `LLM_PROVIDER=nvidia LLM_MODEL=nvidia/nemotron-3-super-120b-a12b MOCK_LLM=0 python scripts/eval_rag.py` on the real index. **Supersedes the earlier 18.8 s measurement (analyze 7404, synthesize 10771), whose node split came from a different keyed run** |
+| Answer latency, simple question (mock) | 88.4 ms total — retrieve 64.0, synthesize 14.0, verify 5.9, analyze 4.5 | live `node_trace`, `MOCK_LLM=1` — **mock mode**, so it reproduces keylessly and stands apart from the real-provider row above |
 | Answer latency, decomposed comparison (mock) | 41.1 ms total — retrieve 20.6, synthesize 12.4, verify 5.9, analyze 2.2 | live `node_trace`, `MOCK_LLM=1` |
 | Node path, `simple` | 5 nodes: contextualize → analyze → retrieve → synthesize → verify | `node_trace` |
 | Node path, `multi_part` | 6 nodes: the above plus `decompose_question` | `node_trace` |
@@ -348,10 +400,10 @@ and say why, rather than carrying an invented figure.
 | Golden QA — mock-mode metrics that stay unmeasurable | retrieval hit-rate@5 2/7 observed, citation presence 1/8, figure match 1/7 — all **N/A**: the mock embedder is a sha256 hash, the mock LLM cites only blocks containing its figure, and the mock answers from scripted phrases | `scripts/eval_rag.py` prints these itself |
 | Embedding provider | **local Hugging Face by default**: `fastembed` 0.9.0 (ONNX Runtime), `BAAI/bge-small-en-v1.5`, 384-dim, 65 MB cached, no key, no `/embeddings` call | `src/core/local_embedder.py`; `EMBEDDING_PROVIDER=local` |
 | Docker cold start | image **271.5 MiB** (was 310.9 MiB before the dev-toolchain split, −39.4 MiB); `docker build --no-cache` 188–202 s, warm 1–2 s; `compose up` 0.63 s; container start → first `/_stcore/health` 200 = **1.6–1.7 s**; non-root `uid=10001(appuser)`; healthcheck `starting`→`healthy` at ~4.5 s, and proven to detect failure; named-volume markers survive `down`/`up` and a full rebuild; **469 tests pass inside the container** with no key and no network | verified against every `docs/PLAN.md` T22 criterion; `MOCK_LLM=1` proven download-free under `--network none` |
-| **Real CI** | hosted Ubuntu 24.04 runner on `main` **completed `success`**, run `38461934270`; per-step: ruff `All checks passed!`, black `52 files would be left unchanged`, mypy `no issues found in 18 source files`, floor guard, pytest+coverage, and `docker build --tag isipfin .` | outcomes read from the run log, not asserted |
+| **Real CI** | hosted Ubuntu 24.04 runner on `main` **completed `success`**, run `38461934270`; per-step: ruff `All checks passed!`, mypy `no issues found in 18 source files`, floor guard, pytest+coverage, and `docker build --tag isipfin .` (that run predates the current file set; the *Gates* row above carries the current locally measured counts, and this row keeps the historical run's shape) | outcomes read from the run log, not asserted |
 | T20 debug panel (live + historical) | picker live-first then newest-first stored rows; live panel carries plan, 5-node path with latency/tokens, 8 retrieval cards; a stored row renders its **persisted** trace + grounded flag, with the two sections the store does not keep reading explicit "not recorded" prose; A's `hybrid_retrieve 79.8 ms` vs B's `10.6 ms` confirms no cross-answer mixing | driven in Chromium on the mock-mode index, DB rows cross-checked |
-| Test suite | **469 passed** (`pytest -q`) — matching the in-container run exactly | CI command |
-| Gates | `ruff check` clean; `black --check` 52 files unchanged; `mypy src/utils src/chains` clean (18 files); `check_floor.py --repo-wide` clean (52 files); mock eval exit 0 | the exact commands in `.github/workflows/ci.yml` |
+| Test suite | **634 passed** (`pytest -q` — `634 passed in 40.50s`); the in-container row above carries its own separately measured count, so the two are reported as two runs rather than assumed equal | `python -m pytest -q` in the repo venv |
+| Gates | `ruff check` clean (`All checks passed!`); `black --check` reports **57 files would be left unchanged**; `mypy src/utils src/chains` clean (**no issues found in 18 source files**); `check_floor.py --repo-wide` clean (**56 file(s)**); mock eval exit 0 | the exact commands in `.github/workflows/ci.yml`, each run locally this pass; the CI log's own per-step numbers were recorded when that run happened |
 | Browser (Chromium, live app) | stylesheet survives reruns (1 `<style>` node, `--isip-accent: #FF7A1A` after each click); 4 nav items + 6 chips render with Material icons; rail width 260px; composer radius 16px; real-provider answer rendered with a citation card to page 44 | §3c — see the correction there about first-paint-only measurement |
 
 **Determinism posture.** Given a provider that behaves this way — three identical planner calls at
@@ -409,13 +461,38 @@ verification payload re-shipped the entire retrieved context even when the answe
 (~6,900 prompt tokens spent to verify a single claim — the reason `groundedness_check` cost 20.5s
 before the trim and 6ms after).
 
-**On Groq.** Groq was requested by the submission's owner and is fully wired in — base URL, model
-`openai/gpt-oss-120b`, and the `LLM_API_KEY` / `LLM_BASE_URL` / `GROQ_API_KEY` precedence chain are
-all in place — but no Groq key was ever supplied, so nothing in this submission was verified
-against Groq and no claim here rests on it. Every real-mode number in this section came from the one
-keyed endpoint that was actually available: an NVIDIA-compatible server
-(`https://integrate.api.nvidia.com/v1`) running `nvidia/nemotron-3-super-120b-a12b`, with
-embeddings local throughout.
+**On Groq — a key *was* supplied, a full 10-case keyed run was performed, and the record of why it
+was not kept is below rather than hidden.** Groq is wholesale-configurable at runtime —
+`LLM_PROVIDER=groq` with `LLM_MODEL=openai/gpt-oss-120b` and `EMBEDDING_PROVIDER=local`, all
+documented in `README.md` and `.env.example` — and it was exercised for real against the real
+384-dim index, first on `openai/gpt-oss-120b` and then on `openai/gpt-oss-20b` when the run moved
+to the 20B model. The measured finding is that it was **not kept for a tier reason, not a quality
+reason**: Groq's free tier enforces a rolling **8,000 tokens-per-minute** ceiling (~200,000/day),
+and one in-scope case costs about **10,400 tokens** (P1 ~2,038 + P3 bounded by
+`CONTEXT_TOKEN_BUDGET = 6000` + P5 ~2,100) — the per-node arithmetic is worked out in
+`docs/LOCAL-INFERENCE.md` §7.1. A single case therefore overspends one minute's budget before it
+finishes, and a full keyed golden run is roughly half the daily quota. The log
+(`.evalwork/keyed20b.log`) shows the consequence plainly: `429 ... Limit 8000, Used 5751,
+Requested 2371`, a request that cannot fit the window at all, and the run's own aggregate states
+`cases failing : q01, q02, q03, q04, q05, q08` with `cases not measured : q03, q07` — **8 of the 10
+cases either failed or could not be measured, all from rate-limiting** (the two surviving refusals
+q09 and q10 never reach the provider, decided by the symbolic year gate and the entity check). Two
+planner calls degraded outright (q03 and q07, refusing with `missing_aspect=None` — a 429 scoring as
+a refusal when it was an outage), q05 and q08 raised as `RateLimited`/`LLMError` mid-run, and q02 and
+q04 paid retry-dominated tails (58,745.4 ms and 57,290.5 ms) for answers whose figures came back
+`MISSING` anyway. That run exposed two *harness* defects, both fixed since: the summary's verdict
+comparison was inverted (`"FAIL" if value > bar else "PASS"`), so a metric at or above its floor
+printed FAIL while one below it printed PASS; and `figure_match` compared `$211,915` against an
+answer printing `$ 211,915 million` with U+202F figure spaces, so a correct answer scored 0.00. A
+third, scoring flaw recorded a planner 429 as a real refusal — the `planner_degraded` path landed in
+`refusal_correctness`'s denominator instead of being named as infrastructure, which the harness now
+does. Those three fixes are why the same code now measures four of the five bars met on the NVIDIA
+endpoint (`figure_match` at 6/7 against a 0.95 bar is the remaining miss, and the exit code is 1).
+Every real-mode number in this section comes from that NVIDIA endpoint with local embeddings: an
+NVIDIA-compatible server (`https://integrate.api.nvidia.com/v1`) running
+`nvidia/nemotron-3-super-120b-a12b`. The Groq key is preserved in the repo's own
+`.env.pre-nvidia.bak`, so the path is repeatable by anyone who wants to re-measure it — the
+decision is recorded, not locked away.
 
 ### Why this pass is mostly verification, and what it found
 
