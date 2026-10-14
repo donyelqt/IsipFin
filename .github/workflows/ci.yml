@@ -43,12 +43,21 @@ jobs:
           # .python-version pins `3.11`; requires-python == "3.11.*" (pyproject.toml).
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+          # The gates install the dev file, so the cache must key on it: keying on
+          # requirements.txt alone would restore a cache that never contained ruff, which
+          # is the failure this adds back.
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # requirements-dev.txt installs requirements.txt first, so this is the whole set
+          # the gates below need. requirements.txt alone is deliberately insufficient: the
+          # dev toolchain was split out of it (PR #32) so it does not ship in the runtime
+          # image, which is what broke these steps after that split.
+          pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
         run: ruff check src tests scripts app.py
