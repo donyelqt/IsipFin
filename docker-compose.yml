@@ -23,18 +23,24 @@ services:
     # defaults to 1 only when nothing sets it at all — the keyless offline demo path; set it
     # to 0 in .env for real answers.
     environment:
-      # Chat credentials — the ADR-005 precedence chain (src/utils/llm.py): LLM_API_KEY
-      # beats OPENAI_API_KEY beats GROQ_API_KEY (which alone implies Groq's base URL), and
-      # LLM_BASE_URL beats OPENAI_BASE_URL. The LLM_* names default to EMPTY, never to a
-      # value, so an unset one cannot shadow a configured OPENAI_*. There is deliberately no
-      # LLM_MODEL: OPENAI_MODEL names the OpenAI-compatible protocol, not a vendor, so it
-      # already addresses Groq / NVIDIA / Ollama and a second name would be surface.
+      # Chat configuration — the ADR-005 chain (src/utils/llm.py). One name per setting:
+      #   LLM_PROVIDER  which provider: openai (default) | groq | nvidia | ollama | vllm |
+      #                 azure. Selects the endpoint family and the default model.
+      #   LLM_API_KEY   the key
+      #   LLM_BASE_URL  endpoint override for a custom, Azure or self-hosted endpoint
+      #   LLM_MODEL     the model id
+      # OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL are accepted aliases at lower
+      # precedence, and GROQ_API_KEY is a key alias that also implies LLM_PROVIDER=groq.
+      # Every name defaults to EMPTY, never to a value, so an unset one cannot shadow a
+      # configured value. MOCK_LLM is checked before all of them and needs no key.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
       # Dense embeddings: local (default — in-process HF/ONNX via fastembed) or api.
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       LOCAL_EMBEDDING_MODEL: ${LOCAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}

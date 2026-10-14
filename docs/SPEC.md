@@ -71,7 +71,7 @@ not hand-waved.
 # Setup
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                                   # set OPENAI_API_KEY / OPENAI_BASE_URL
+cp .env.example .env                                   # set LLM_PROVIDER / LLM_API_KEY (LLM_MODEL optional)
 
 # Data (reference corpus — see note below: Microsoft serves DOCX, not PDF)
 # (no fetch command: drop the PDF in by hand, then index it)
@@ -136,14 +136,29 @@ Prompt assets live in `docs/prompts/` (P1–P5 markdown, version-headered), load
 `src/utils/prompts.py`; `scripts/prompts_meta.json` records the minimum version and the
 consuming node per id. There is deliberately **no** top-level `prompts/` directory.
 Environment variables are read by the modules that use them (`build_llm()` reads
-`MOCK_LLM`/`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`, `scripts/build_index.py` reads
-the same names plus the `EMBEDDING_*` pair), but the `.env` file itself is loaded from the
-repo root by `src/utils/settings.py::load_env()`: it resolves the root from its own
-`__file__` (so `streamlit run app.py`, `python scripts/build_index.py` and pytest all find
-the same file), is idempotent, and never overrides an already-set variable. It is called
-first in `app.py::main()` and in `scripts/build_index.py::main()` /
+`MOCK_LLM` first, then the chat surface `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_BASE_URL` /
+`LLM_MODEL` — with `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` and `GROQ_API_KEY`
+as lower-precedence aliases — `scripts/build_index.py` reads the same names plus the
+`EMBEDDING_*` pair), but the `.env` file itself is loaded from the repo root by
+`src/utils/settings.py::load_env()`: it resolves the root from its own `__file__` (so
+`streamlit run app.py`, `python scripts/build_index.py` and pytest all find the same file),
+is idempotent, and never overrides an already-set variable except for the provider-aiming
+names, where a non-blank value **in the file** is authoritative so an ambient `OPENAI_*`
+export cannot silently replace a credential written into this repo's own config. It is
+called first in `app.py::main()` and in `scripts/build_index.py::main()` /
 `scripts/eval_rag.py::main()` — that call is what makes the documented
 `cp .env.example .env` setup path supply the key and `MOCK_LLM` at all.
+
+`MOCK_LLM` is checked before the chat names: with `MOCK_LLM=1` no `LLM_PROVIDER`,
+`LLM_API_KEY`, `LLM_BASE_URL` or `LLM_MODEL` is needed at all, which is the keyless demo and
+test path. `LLM_PROVIDER` (`openai` · `groq` · `nvidia` · `ollama` · `vllm` · `azure`)
+selects the provider's own endpoint; `LLM_BASE_URL` overrides it for a custom, Azure or
+self-hosted endpoint; `LLM_API_KEY` is the single chat credential; `LLM_MODEL` is the model
+id, still overridable per call through `params.model`. Because Groq exposes no
+`/embeddings` endpoint, chat and embeddings are separate settings — a Groq chat config pairs
+with `EMBEDDING_PROVIDER=local` — and the Groq model must be one that accepts
+`response_format: json_schema` (`analyze_question`, `groundedness_check`). `.env.example`
+is the worked reference for all of it.
 
 ## 5. Code Style
 

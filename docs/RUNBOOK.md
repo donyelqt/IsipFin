@@ -9,17 +9,19 @@
 
 | Var | Required | Default | Purpose |
 |---|---|---|---|
-| `LLM_API_KEY` | no | — (deliberately unset) | chat credential; beats `OPENAI_API_KEY` and `GROQ_API_KEY` — the override for a host that already exports `OPENAI_*` (README §1.2) |
-| `LLM_BASE_URL` | no | — (deliberately unset) | chat endpoint; beats `OPENAI_BASE_URL`. Kept empty so an unset `LLM_*` cannot shadow a configured `OPENAI_*` in the first-hit-wins chain |
-| `OPENAI_API_KEY` | for real LLM mode | — | chat credential; second in the chain, ahead of `GROQ_API_KEY`. Never committed, read from env only |
-| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | OpenAI-compatible chat endpoint (Azure / vLLM / Ollama at `http://localhost:11434/v1`) |
-| `GROQ_API_KEY` | no | — | Groq chat credential; setting it alone also selects Groq's base URL `https://api.groq.com/openai/v1` when no base URL is set anywhere |
-| `OPENAI_MODEL` | no | `gpt-4o-mini` | chat model id. Protocol-named, not vendor-named: also addresses Groq (`openai/gpt-oss-120b`), NVIDIA or Ollama models — there is no separate model alias |
+| `LLM_PROVIDER` | no | `openai` (blank in `.env.example`, so a `GROQ_API_KEY` alias still implies `groq`) | which chat provider: `openai` · `groq` · `nvidia` · `ollama` · `vllm` · `azure`. Selects that provider's own endpoint, so `groq` needs no base URL |
+| `LLM_API_KEY` | no | — (deliberately unset) | **the chat credential — the one to fill in.** Beats `OPENAI_API_KEY` and `GROQ_API_KEY`, so it overrides a host that already exports `OPENAI_*` (README §1.2) |
+| `LLM_BASE_URL` | no | — (deliberately unset) | chat endpoint override for a custom / Azure / self-hosted endpoint. Empty so the selected provider's own endpoint is used and an unset `LLM_*` cannot shadow a configured alias |
+| `LLM_MODEL` | no | the provider's own default (`gpt-4o-mini` for `openai`) | chat model id. Beats `OPENAI_MODEL`; a per-call model override in the UI still wins |
+| `OPENAI_API_KEY` | for real LLM mode | — | alias for the chat credential, read only when `LLM_API_KEY` is unset. Never committed, read from env only |
+| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | alias for the chat endpoint (Azure / vLLM / Ollama at `http://localhost:11434/v1`), read only when `LLM_BASE_URL` is unset |
+| `GROQ_API_KEY` | no | — | alias for the chat credential that also implies `LLM_PROVIDER=groq`. Alone, it selects Groq's base URL `https://api.groq.com/openai/v1` only when no base URL is set anywhere |
+| `OPENAI_MODEL` | no | `gpt-4o-mini` | alias for the model id, read only when `LLM_MODEL` is unset. Carries any provider's model — `openai/gpt-oss-120b`, `nvidia/...`, `llama3` |
 | `EMBEDDING_PROVIDER` | no | `local` | **the embedder path.** `local` = in-process Hugging Face model via fastembed/ONNX — no key, no `/embeddings` endpoint; `api` = the `EMBEDDING_*` endpoint below; `MOCK_LLM=1` overrides both |
 | `LOCAL_EMBEDDING_MODEL` | no | `BAAI/bge-small-en-v1.5` (384-dim) | model used when `EMBEDDING_PROVIDER=local`; ~150 MB, downloaded and cached on first use |
 | `EMBEDDING_BASE_URL` | no | — | only for `EMBEDDING_PROVIDER=api`; defaults to the chat base URL |
 | `EMBEDDING_MODEL` | no | `text-embedding-3-small` | only for `EMBEDDING_PROVIDER=api`; embedding model id |
-| `MOCK_LLM` | no | `0` (Docker: `1` unless `.env` sets it) | `1` = deterministic scripted LLM **and** offline sha256 embedder, no network — demo and test path; checked before `EMBEDDING_PROVIDER`, so it wins |
+| `MOCK_LLM` | no | `0` (Docker: `1` unless `.env` sets it) | `1` = deterministic scripted LLM **and** offline sha256 embedder, no network — demo and test path. Checked **before** `LLM_PROVIDER` / `LLM_API_KEY`, so it needs no key and wins over every chat setting |
 | `DATA_DIR` | no | `./data` | runtime state root (index, pdfs, sqlite) |
 | `LOG_JSON` | no | `1` | JSON log format |
 | `LANGSMITH_TRACING` | no | `false` | optional LangSmith hooks, env-gated (ADR-007) |
@@ -28,16 +30,34 @@
 `.env.example` documents all of the above with safe defaults; `MOCK_LLM=1` is the keyless demo
 path.
 
-**Chat credential precedence (first hit wins):** key `LLM_API_KEY` → `OPENAI_API_KEY` →
-`GROQ_API_KEY`; base URL `LLM_BASE_URL` → `OPENAI_BASE_URL` → Groq's URL when the key came from
-`GROQ_API_KEY` and no base URL is set anywhere; model `OPENAI_MODEL` → built-in default (a
-per-call override still wins). Neither `LLM_*` name has a default on purpose: a host that
-already exports `OPENAI_API_KEY` / `OPENAI_BASE_URL` beats `.env`
-(`load_dotenv(override=False)`), so a `.env` that names Groq is silently ignored and the
-`LLM_*` names are how you regain control. The trap and the fix are explained in `README.md`
-§1.2; the gateway's `resolved_config()` / `resolved_provider()` report what was actually
-resolved, with the key redacted. `docker compose` passes each override variable through empty
-so an unset one cannot shadow a configured `OPENAI_*`.
+**Chat configuration — four primary names, then aliases (first hit wins).** Primary:
+`LLM_PROVIDER` (selects the provider and therefore its own endpoint), `LLM_API_KEY`,
+`LLM_BASE_URL`, `LLM_MODEL`. Aliases, read only when the matching primary is unset:
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`, plus `GROQ_API_KEY` (a key alias
+that also implies `LLM_PROVIDER=groq`, and whose base URL applies only when no base URL is
+set anywhere). The model falls back to the built-in default; a per-call model override in
+the UI still wins. `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` are deliberately unset in
+`.env.example` so an unset one cannot shadow a configured alias.
+
+While `load_dotenv(override=False)` normally lets the environment beat `.env`, the names
+that aim a request are the deliberate exception: a non-blank value **in the file** wins
+over an export, so a `.env` that names Groq is never silently ignored because the host
+already exports `OPENAI_API_KEY` / `OPENAI_BASE_URL`. The trap and the fix are explained in
+`README.md` §1.2; the gateway's `resolved_config()` / `resolved_provider()` report what was
+actually resolved — including which variable supplied the key — with the key redacted.
+`docker compose` passes each override variable through empty so an unset one cannot shadow a
+configured alias.
+
+**Groq needs the local embedder, and a model that supports Structured Outputs.** Groq's API
+exposes chat and responses but **no `/embeddings` endpoint**, so a Groq chat config must run
+`EMBEDDING_PROVIDER=local` (the default) or an `EMBEDDING_BASE_URL` that actually serves
+`/embeddings` — that requirement is why chat and embeddings are separate settings. The
+model id is not free choice either: `analyze_question` and `groundedness_check` send
+`response_format: json_schema`, which Groq supports on `openai/gpt-oss-20b`,
+`openai/gpt-oss-120b` and `qwen/qwen3.8-27b` (`strict: true`), best-effort on those plus
+`openai/gpt-oss-safeguard-20b`, and **not at all** on the popular
+`llama-3.3-70b-versatile` — which would break both JSON nodes. Hence
+`LLM_MODEL=openai/gpt-oss-120b` in the worked example.
 
 **Embedder — the local path is the default.** `EMBEDDING_PROVIDER=local` runs
 `LOCAL_EMBEDDING_MODEL` (384-dim) in-process on ONNX Runtime with no key and no `/embeddings`
@@ -94,7 +114,7 @@ ruff check src tests scripts app.py && black --check src tests scripts app.py
 | Banner: "context too large" | wide decomposed question + high k | lower `k` in sidebar; graph auto-retries once with smaller budget |
 | Banner: "index not built — upload a PDF" | `RetrievalError` on load | rebuild index; check `data/index/chunks.jsonl` exists |
 | Per-file upload error card | scanned/corrupt PDF | expected for image-only PDFs — other files still ingest; warning names pages |
-| Auth banner naming the chat key vars (`LLM_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY`) | bad/missing key, or an ambient key winning | fix `.env`, or set `LLM_API_KEY` when the host already exports `OPENAI_*` (README §1.2); check `resolved_config()`; the key is never echoed |
+| Auth banner naming the chat key vars (`LLM_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY`) | bad/missing key, or an ambient key/alias winning | set `LLM_API_KEY` (and `LLM_PROVIDER`) when the host exports `OPENAI_*`; check `resolved_config()` for which variable supplied the key — never echoed |
 | `docker compose up` port busy | 8501 in use | `ports: "8502:8501"` in compose |
 | Prompt changed but behavior stale | prompt file cached at startup | restart the app; prompts load at startup via `load_prompt` |
 

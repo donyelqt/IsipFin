@@ -159,3 +159,77 @@ Resolution is `OPENAI_MODEL` → the built-in default, with a per-call override 
 The gateway exposes `resolved_config()` / `resolved_provider()` (`src/utils/llm.py`), which
 report the resolved provider, base URL and model with the key always redacted — the first
 thing to check on an auth error.
+
+## Update — 2026-10-14: an explicit `LLM_PROVIDER` selector, one name per setting
+
+**Status:** Accepted; supersedes the credential surface of the 2026-10-13 update above (that
+text is kept as-is; the `EMBEDDING_PROVIDER` half of it is untouched).
+
+**What the owner found.** The configuration surface described above was reported as "so
+confusing", and unusable for the audience it was built for: a reviewer who clones the repo and
+brings their own setup. The owner's question, in substance: *why can it just say `openai` and
+`groq`, so that users and reviewers are able to put their ref in as the actual OpenAI API key or
+Groq instead?* The complaint was not about any single variable but about the chain: three key
+spellings (`LLM_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`) and two endpoint spellings
+(`LLM_BASE_URL`, `OPENAI_BASE_URL`) with no statement that `OPENAI_*` names the *protocol*, not
+the vendor. Reading the env contract required knowing an ambient-hijack story before the
+ordinary case — setting a key — was legible at all.
+
+**The decision.** The chat leg gains an explicit provider selector, with one name per setting:
+
+| Variable | Meaning |
+|---|---|
+| `LLM_PROVIDER` | `openai` (default) · `groq` · `nvidia` · `ollama` · `vllm` · `azure` — selects the default endpoint |
+| `LLM_API_KEY` | the key — **one name** |
+| `LLM_BASE_URL` | optional override for a custom / Azure / self-hosted endpoint |
+| `LLM_MODEL` | the model id, optional |
+
+`GROQ_API_KEY` is kept at lower precedence as a key alias that also implies
+`LLM_PROVIDER=groq` (and therefore Groq's default endpoint) — the "one variable is a working
+Groq config" premise from 2026-10-13 still holds. `MOCK_LLM=1` short-circuits before any
+credential variable is read, so it wins over all of them and needs none.
+
+**Why the earlier rationale was insufficient.** The ambient-hijack reasoning was correct on
+its own terms: a host exporting `OPENAI_API_KEY` / `OPENAI_BASE_URL` does silently beat `.env`,
+and that fully justified `LLM_API_KEY` / `LLM_BASE_URL` existing as *overrides*, and fully
+justified there being no `LLM_MODEL` while no ambient `OPENAI_MODEL` was observed. What it did
+not justify was making those two overrides the *only* documented names. A design optimised for
+the hijack case made the ordinary case — a reviewer with one key from one vendor — worse, and
+it broke the premise it had itself established one paragraph earlier: `GROQ_API_KEY` alone being
+a working config is only readable if the reader knows the provider-precedence story, and the
+chain resolved the credential left-to-right with nothing saying where the endpoint came from.
+The new surface keeps both properties instead of trading one for the other: `LLM_PROVIDER`
+picks the endpoint, `LLM_BASE_URL` still overrides it (the ambient-hijack case is unchanged),
+`GROQ_API_KEY` remains a key alias that also implies the provider, and `OPENAI_*` stays accepted
+at lower precedence for CI hosts, grading hosts and existing configs.
+
+**What was deliberately not done.** So that a reader can tell the old names are load-bearing
+rather than leftovers:
+
+- no alias was removed — `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` and
+  `GROQ_API_KEY` all still resolve;
+- `LLM_MODEL` is added as an optional acceptance, not a replacement — the 2026-10-13 reasoning
+  that `OPENAI_*` is protocol-named still stands, and `OPENAI_MODEL` remains accepted;
+- `MOCK_LLM=1`'s precedence is unchanged: it short-circuits before any credential is read, so
+  the keyless demo and CI path behave exactly as before;
+- the `EMBEDDING_PROVIDER` resolution of 2026-10-13 is not touched; the `LLM_*` names above
+  govern chat only.
+
+**Consequences.**
+
+- The precedence chain gets one comment block in `src/utils/llm.py`, stating the order and the
+  ambient-override rule in the order the code evaluates it — the chain no longer has to be
+  reverse-engineered from prose or from `resolved_config()` output.
+- `resolved_config()` remains the diagnostic, and now reports the resolved *provider* alongside
+  the base URL and model, with the key always redacted.
+- `LLM_MODEL` is a real decision on Groq, not a free parameter: `analyze_question` and
+  `groundedness_check` need `response_format: json_schema`, and Groq gates Structured Outputs
+  by model — `strict: true` on `openai/gpt-oss-20b`, `openai/gpt-oss-120b`,
+  `qwen/qwen3.8-27b`; best-effort on `openai/gpt-oss-safeguard-20b`; and
+  `llama-3.3-70b-versatile` rejects `response_format: json_schema` outright. A reviewer who
+  picks a Groq model from the outside gets the constraint's failure at the first JSON node, not
+  at ingest, so `LLM_PROVIDER=groq` without a supported `LLM_MODEL` is a misconfiguration the
+  diagnostics must surface.
+- The chat/embeddings split stays: Groq has no `/embeddings`, so embeddings default to
+  `EMBEDDING_PROVIDER=local` (fastembed, in-process, no key) and the two legs may legitimately
+  differ. `LLM_PROVIDER` never moves the embedder.
