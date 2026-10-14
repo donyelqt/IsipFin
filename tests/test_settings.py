@@ -11,8 +11,10 @@ The invariants pinned:
 
 1. a blank value in `.env` (`.env.example` ships `OPENAI_API_KEY=`) never clobbers an
    ambient one;
-2. a non-blank value in `.env` beats an ambient one for the seven authoritied names —
-   the ones that decide which provider a request is aimed at;
+2. a non-blank value in `.env` beats an ambient one for the eight authoritied names —
+   the ones that decide which provider a request is aimed at: the key, the endpoint, the
+   model and the provider selector, in both the `OPENAI_*` and `LLM_*` / `GROQ_*`
+   spellings;
 3. every *other* name still loses to the environment, so the general rule is intact
    and the allowlist is a proven-narrow one, not a blanket inversion;
 4. `MOCK_LLM` is deliberately outside the allowlist: `MOCK_LLM=1` in the shell keeps
@@ -45,6 +47,7 @@ _AMBIENT_CHAT_NAMES = (
     "LLM_API_KEY",
     "LLM_BASE_URL",
     "LLM_MODEL",
+    "LLM_PROVIDER",
     "MOCK_LLM",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
@@ -109,7 +112,7 @@ def test_a_missing_env_file_leaves_the_environment_untouched(
     assert os.environ["OPENAI_BASE_URL"] == "https://ambient.example/v1"
 
 
-# --- 2. a non-blank value in .env beats an ambient one, for the seven --------------
+# --- 2. a non-blank value in .env beats an ambient one, for the eight ---------------
 
 
 @pytest.mark.parametrize("name", AUTHORITIED_NAMES)
@@ -185,7 +188,7 @@ def test_the_endpoint_written_in_env_beats_an_ambient_export(
 def test_a_non_authoritied_name_still_loses_to_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Proof the fix is scoped: anything outside the seven behaves as before.
+    """Proof the fix is scoped: anything outside the eight behaves as before.
 
     `EMBEDDING_PROVIDER` is the case that matters — it decides the vector width, so an
     ambient choice must not be silently overridden by a stale file.
@@ -213,18 +216,40 @@ def test_mock_llm_in_the_shell_beats_the_file(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_the_allowlist_is_exactly_the_provider_aiming_names() -> None:
-    """The contract itself: seven names, no operational one, `MOCK_LLM` absent."""
+    """The contract itself: eight names, no operational one, `MOCK_LLM` absent.
+
+    The set is the one-name-per-setting surface added to the gateway: the key,
+    the endpoint, the model and the provider selector, each in both the `LLM_*`
+    spelling and the `OPENAI_*` / `GROQ_*` aliases.
+    """
     assert AUTHORITIED_NAMES == (
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_MODEL",
+        "GROQ_API_KEY",
         "LLM_API_KEY",
         "LLM_BASE_URL",
         "LLM_MODEL",
-        "GROQ_API_KEY",
+        "LLM_PROVIDER",
     )
     assert "MOCK_LLM" not in AUTHORITIED_NAMES
     assert not {name for name in AUTHORITIED_NAMES if name.startswith("EMBEDDING")}
+    assert "LLM_PROVIDER" in AUTHORITIED_NAMES, "the provider selector aims a request too"
+
+
+def test_llm_provider_written_in_env_beats_an_ambient_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The newest name: `LLM_PROVIDER` in `.env` outranks an ambient one."""
+    monkeypatch.setenv("LLM_PROVIDER", "ambient")
+    monkeypatch.setenv("LLM_API_KEY", "ambient-key")
+    _write_env({"LLM_PROVIDER": "groq"})
+    settings.load_env()
+    resolved = resolved_config()
+    assert os.environ["LLM_PROVIDER"] == "groq"
+    assert resolved.configured_provider == "groq"
+    assert resolved.provider == "groq"
+    assert resolved.base_url == "https://api.groq.com/openai/v1"
 
 
 # --- 4. idempotence --------------------------------------------------------------

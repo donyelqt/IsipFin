@@ -18,12 +18,13 @@ The invariants pinned are the ones ADR-005 and docs/SPEC.md section 9 freeze:
 6. token counts come from the response's usage field and ``latency_ms`` is measured;
 7. the revenue question returns the exact FY2023 figure through the mock.
 
-An eighth invariant is pinned by the same file: the credential chain resolves ``LLM_API_KEY``
-/ ``LLM_BASE_URL`` ahead of the ``OPENAI_*`` names and ahead of ``GROQ_API_KEY`` (whose
-endpoint follows the key), and the configuration it resolved is reportable with the key
-redacted — the diagnostic that makes an ambient ``OPENAI_API_KEY`` silently replacing a key
-written into ``.env`` visible instead of mysterious. The model keeps its single
-protocol-named variable: ``OPENAI_MODEL`` names the wire format, not a vendor.
+An eighth invariant is pinned by the same file: the credential chain resolves the primary
+`LLM_*` surface — `LLM_PROVIDER` for the endpoint family, `LLM_API_KEY`, `LLM_BASE_URL` and
+`LLM_MODEL` — ahead of the `OPENAI_*` aliases and ahead of `GROQ_API_KEY` (which implies the
+provider *and* Groq's endpoint), and the configuration it resolved is reportable with the key
+redacted — the diagnostic that makes an ambient `OPENAI_API_KEY` silently replacing a key
+written into `.env` visible instead of mysterious. The per-call `params.model` still beats
+every variable: the sidebar's picker writes it.
 """
 
 from __future__ import annotations
@@ -42,7 +43,9 @@ from typing import Any
 import pytest
 from src.utils.llm import (
     DEFAULT_BASE_URL,
+    DEFAULT_PROVIDER,
     GROQ_BASE_URL,
+    PROVIDER_DEFAULTS,
     REDACTED_KEY,
     ChatLLM,
     ChatResult,
@@ -731,6 +734,7 @@ else:
         "api_key_matches_expected": expected_key is None or client.client.api_key == expected_key,
         "resolved": {
             "provider": resolved.provider,
+            "configured_provider": resolved.configured_provider,
             "api_key": resolved.api_key,
             "base_url": resolved.base_url,
             "model": resolved.model,
@@ -748,6 +752,8 @@ _CREDENTIAL_ENV_NAMES = (
     "GROQ_API_KEY",
     "LLM_API_KEY",
     "LLM_BASE_URL",
+    "LLM_MODEL",
+    "LLM_PROVIDER",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
@@ -829,14 +835,15 @@ def test_per_call_model_overrides_the_environment() -> None:
     assert reported["model"] == "gpt-4o"
 
 
-# --- 8. credential precedence: LLM_* > OPENAI_* > GROQ_API_KEY ---------------------
+# --- 8. credential precedence: the LLM_* surface > OPENAI_* > GROQ_API_KEY -----------
 #
 # The defect these pin: `.env` is loaded with override=False, so a host that exports
 # OPENAI_API_KEY (this one does, with an NVIDIA key) silently wins over whatever a user
 # wrote into `.env`, and the request goes out with the host's credential and endpoint. The
-# LLM_* names outrank it; GROQ_API_KEY is the name a user reaches for and it implies Groq's
-# endpoint. Each precedence is proven independently, in a child interpreter, so the key
-# itself never reaches this process's assertions — only "which variable supplied it" does.
+# LLM_* names outrank it; GROQ_API_KEY is the name a user reaches for and it implies the
+# Groq provider and endpoint. Each precedence is proven independently, in a child
+# interpreter, so the key itself never reaches this process's assertions — only "which
+# variable supplied it" does.
 
 
 def test_llm_api_key_beats_a_hostile_openai_key() -> None:
@@ -1012,3 +1019,287 @@ def test_no_key_resolves_to_none_and_an_empty_mask(monkeypatch: pytest.MonkeyPat
     assert resolved.provider is None
     assert resolved_provider() is None
     assert resolved.api_key == "" and resolved.key_source is None
+
+
+# --- 9. LLM_PROVIDER: the one-name-per-setting surface ------------------------------
+#
+# The defect these pin: the chat surface had three spellings for one setting (the key) and
+# two for another (the model), and nothing said which was primary. LLM_PROVIDER /
+# LLM_API_KEY / LLM_MODEL / LLM_BASE_URL are now the primary names, and the OPENAI_* ones
+# plus GROQ_API_KEY are aliases at lower precedence. Each new behaviour is proven in a
+# child interpreter so the host's ambient exports (it exports OPENAI_API_KEY and
+# OPENAI_BASE_URL, pointing at NVIDIA) cannot decide an outcome a test did not set.
+
+
+def test_the_primary_provider_chain_resolves_groq_from_llm_provider() -> None:
+    """Acceptance 1: LLM_PROVIDER=groq + LLM_API_KEY, with the OPENAI_* names unset."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="groq",
+        LLM_API_KEY="gsk-x",
+        OPENAI_API_KEY="",
+        OPENAI_BASE_URL="",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["provider"] == "groq"
+    assert reported["resolved"]["configured_provider"] == "groq"
+    assert reported["resolved"]["base_url"] == GROQ_BASE_URL
+    assert reported["resolved"]["key_source"] == "LLM_API_KEY"
+
+
+def test_the_primary_provider_chain_defaults_to_openai() -> None:
+    """Acceptance 2: the openai provider is the default, and its endpoint is OpenAI's."""
+    reported = _probe_real_interpreter(LLM_PROVIDER="openai", LLM_API_KEY="sk-x")
+
+    assert "error" not in reported
+    assert reported["resolved"]["provider"] == "openai"
+    assert reported["resolved"]["base_url"] == DEFAULT_BASE_URL
+    assert reported["resolved"]["key_source"] == "LLM_API_KEY"
+
+
+def test_an_unset_provider_resolves_to_openai() -> None:
+    """An unset LLM_PROVIDER is the historical default, not an error."""
+    reported = _probe_real_interpreter(LLM_API_KEY="sk-x")
+
+    assert "error" not in reported
+    assert reported["resolved"]["configured_provider"] == DEFAULT_PROVIDER
+    assert reported["resolved"]["base_url"] == DEFAULT_BASE_URL
+    assert reported["resolved"]["provider"] == "openai"
+
+
+def test_groq_api_key_alone_still_implies_the_provider_and_endpoint() -> None:
+    """Acceptance 3: the GROQ_API_KEY convenience names provider and endpoint."""
+    reported = _probe_real_interpreter(
+        GROQ_API_KEY="gsk-x",
+        OPENAI_API_KEY="",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["configured_provider"] == "groq"
+    assert reported["resolved"]["provider"] == "groq"
+    assert reported["resolved"]["base_url"] == GROQ_BASE_URL
+    assert reported["resolved"]["key_source"] == "GROQ_API_KEY"
+
+
+def test_llm_base_url_still_overrides_the_provider_endpoint() -> None:
+    """Acceptance 4: a self-hosted or Azure deployment is reached by naming the URL."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="ollama",
+        LLM_API_KEY="self-hosted-key",
+        LLM_BASE_URL="http://10.10.0.5:9000/v1",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["base_url"] == "http://10.10.0.5:9000/v1"
+    assert reported["resolved"]["base_url_source"] == "LLM_BASE_URL"
+    # The provider label still comes from the host, which is where the request goes.
+    assert reported["resolved"]["provider"] == "openai-compatible"
+
+
+def test_azure_selects_no_endpoint_and_requires_the_override() -> None:
+    """Azure deployments live at a per-deployment URL, so its default is no endpoint."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="azure",
+        LLM_API_KEY="azure-key",
+        LLM_BASE_URL="https://my-resource.openai.azure.com",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["configured_provider"] == "azure"
+    assert reported["resolved"]["base_url"] == "https://my-resource.openai.azure.com"
+    assert PROVIDER_DEFAULTS["azure"] == (None, None)
+
+
+def test_llm_provider_and_key_beat_the_host_ambient_exports() -> None:
+    """Acceptance 5: with the host's own OPENAI_* exported, the LLM_* pair still wins.
+
+    This host exports OPENAI_API_KEY and OPENAI_BASE_URL (pointing at NVIDIA), and the
+    probe is run with that ambient environment inherited, so this is the acceptance probe
+    and not a restatement of it.
+    """
+    env = dict(os.environ)
+    env.pop("LLM_PROVIDER", None)
+    env.pop("LLM_API_KEY", None)
+    env.pop("LLM_BASE_URL", None)
+    env.pop("LLM_MODEL", None)
+    env.pop("GROQ_API_KEY", None)
+    env.pop("MOCK_LLM", None)
+    env.update(
+        {
+            "MOCK_LLM": "0",
+            "LLM_PROVIDER": "groq",
+            "LLM_API_KEY": "gsk-file",
+            "PROBE_EXPECT_KEY": "gsk-file",
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", _REAL_PROBE],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, f"real-path probe failed:\n{completed.stderr}"
+    reported = json.loads(completed.stdout)
+
+    assert "error" not in reported
+    assert reported["api_key_matches_expected"] is True, "the ambient OPENAI_API_KEY was used"
+    assert reported["resolved"]["key_source"] == "LLM_API_KEY"
+    assert reported["resolved"]["base_url"] == GROQ_BASE_URL, "the ambient base URL was used"
+    assert reported["resolved"]["provider"] == "groq"
+
+
+def test_llm_provider_bases_the_model_on_the_provider() -> None:
+    """A provider that ships a default model gets it, so no bare URL is left unnamed."""
+    reported = _probe_real_interpreter(LLM_PROVIDER="groq", LLM_API_KEY="gsk-x")
+
+    assert "error" not in reported
+    assert reported["model"] == "openai/gpt-oss-120b"
+    assert reported["model"] == PROVIDER_DEFAULTS["groq"][1]
+
+
+def test_llm_model_beats_openai_model() -> None:
+    """Acceptance 6, first half: LLM_MODEL outranks the OPENAI_MODEL alias."""
+    reported = _probe_real_interpreter(
+        LLM_API_KEY="sk-x",
+        LLM_MODEL="llm-model",
+        OPENAI_MODEL="openai-model",
+    )
+
+    assert "error" not in reported
+    assert reported["model"] == "llm-model"
+
+
+def test_openai_model_is_still_read_when_llm_model_is_unset() -> None:
+    """The alias survives at lower precedence: nothing already configured breaks."""
+    reported = _probe_real_interpreter(LLM_API_KEY="sk-x", OPENAI_MODEL="openai-model")
+
+    assert "error" not in reported
+    assert reported["model"] == "openai-model"
+
+
+def test_params_model_beats_llm_model_and_the_provider_default() -> None:
+    """Acceptance 6, second half: the per-call override still outranks every variable."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="groq",
+        LLM_API_KEY="gsk-x",
+        LLM_MODEL="llm-model",
+        OPENAI_MODEL="openai-model",
+        PROBE_PARAMS_MODEL="sidebar-chosen-model",
+    )
+
+    assert "error" not in reported
+    assert reported["model"] == "sidebar-chosen-model"
+
+
+def test_azure_without_an_endpoint_is_a_stated_error_not_a_silent_misroute() -> None:
+    """A provider with no default endpoint must not fall back to OpenAI's host.
+
+    An Azure key sent to ``api.openai.com`` would fail with a confusing auth error; naming
+    the missing configuration is what makes the difference visible.
+    """
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="azure",
+        LLM_API_KEY="azure-key",
+        LLM_BASE_URL="",
+        OPENAI_BASE_URL="",
+    )
+
+    assert "error" in reported, "an unguessable provider must fail loudly"
+    assert "Auth" in reported["error"]
+    assert "LLM_BASE_URL" in reported["error"]
+
+
+def test_an_unrecognised_provider_falls_back_to_openai() -> None:
+    """A typo in a vendor name is a configuration slip, not a crash."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="nvidai", LLM_API_KEY="sk-x", PROBE_PARAMS_MODEL=""
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["configured_provider"] == DEFAULT_PROVIDER
+    assert reported["resolved"]["base_url"] == DEFAULT_BASE_URL
+
+
+def test_llm_provider_wins_over_the_groq_key_implication() -> None:
+    """An explicit provider outranks what the alias implies — both are this user's words."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="ollama",
+        GROQ_API_KEY="gsk-x",
+        LLM_BASE_URL="http://localhost:11434/v1",
+        OPENAI_API_KEY="",
+    )
+
+    assert "error" not in reported
+    assert reported["resolved"]["configured_provider"] == "ollama"
+    assert reported["resolved"]["key_source"] == "GROQ_API_KEY"
+    assert reported["resolved"]["base_url"] == "http://localhost:11434/v1"
+    assert reported["resolved"]["provider"] == "local"
+
+
+def test_an_explicit_provider_endpoint_outranks_an_ambient_openai_base_url() -> None:
+    """Naming the vendor is deliberate: it outranks the protocol-named ambient alias."""
+    reported = _probe_real_interpreter(LLM_PROVIDER="groq", LLM_API_KEY="gsk-x")
+
+    assert "error" not in reported
+    assert reported["resolved"]["base_url"] == GROQ_BASE_URL
+
+
+def test_mock_mode_reads_no_provider_or_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance 7: ``MOCK_LLM=1`` returns the mock and resolves nothing.
+
+    The resolver is replaced with a function that fails, so this proves the chain — key
+    included — was not read, rather than claiming the values did not matter.
+    """
+    from src.utils import llm as gateway
+    from src.utils.mock_llm import MockLLM
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_API_KEY", "llm-key-that-must-not-be-read")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-key-that-must-not-be-read")
+
+    def explode() -> Any:
+        raise AssertionError("MOCK_LLM=1 must return before any credential is read")
+
+    monkeypatch.setattr(gateway, "_resolve_credentials", explode)
+
+    assert isinstance(build_llm(LLMParams()), MockLLM)
+
+
+def test_the_missing_key_message_names_the_provider_surface() -> None:
+    """The primary error a user hits must name the whole new surface."""
+    reported = _probe_real_interpreter(
+        LLM_PROVIDER="",
+        LLM_API_KEY="",
+        OPENAI_API_KEY="",
+        GROQ_API_KEY="",
+        PROBE_EXPECT_KEY="",
+    )
+
+    assert "error" in reported, "no key anywhere must fail the build"
+    message = reported["error"]
+    assert "Auth" in message
+    for name in ("LLM_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "LLM_PROVIDER", "MOCK_LLM=1"):
+        assert name in message, f"the setup error must name {name}"
+
+
+def test_every_provider_resolves_its_own_endpoint() -> None:
+    """Each named provider lands on its own endpoint, with no credential implied."""
+    for provider, (endpoint, _) in PROVIDER_DEFAULTS.items():
+        overrides: dict[str, str] = {
+            "LLM_PROVIDER": provider,
+            "LLM_API_KEY": "key",
+            "PROBE_PARAMS_MODEL": "",
+        }
+        if endpoint is None:
+            overrides["LLM_BASE_URL"] = "https://my-resource.openai.azure.com"
+        reported = _probe_real_interpreter(**overrides)
+
+        assert "error" not in reported, provider
+        assert reported["resolved"]["configured_provider"] == provider
+        assert reported["resolved"]["base_url"] == (
+            endpoint or "https://my-resource.openai.azure.com"
+        ), provider

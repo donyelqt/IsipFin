@@ -14,7 +14,7 @@ Precedence — two rules, and both are deliberate
    lets CI or a grader inject a key without editing anything.
 2. **A value the user typed in `.env` wins over an ambient export — but only for the
    names that decide *where a request goes*.** See :data:`ENV_FILE_AUTHORITY` for why
-   that allowlist is exactly seven names long and nothing else.
+   that allowlist is exactly eight names long and nothing else.
 
 Why rule 2 exists at all: a machine can have `OPENAI_BASE_URL` exported for one
 purpose (on this host it points at NVIDIA) while the repo's own `.env` asks for Groq.
@@ -39,9 +39,9 @@ _LOADED = False
 
 #: The `.env` names that are authoritative over an ambient export.
 #
-#: These six/seven variables — the chat key, the endpoint and the model, in both the
-#: `OPENAI_*` spelling and the `LLM_*` / `GROQ_*` aliases that exist precisely so a
-#: dedicated credential cannot be hijacked — determine **which provider a request is
+#: These eight variables — the chat key, the endpoint, the model and now the provider
+#: selector, in both the `OPENAI_*` spelling and the `LLM_*` spellings that exist precisely
+#: so a dedicated credential cannot be hijacked — determine **which provider a request is
 #: aimed at**. A value the user wrote in this repo's own config file must beat an
 #: ambient export for them, or the file is documentation rather than configuration.
 #:
@@ -56,10 +56,11 @@ ENV_FILE_AUTHORITY: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
+    "GROQ_API_KEY",
     "LLM_API_KEY",
     "LLM_BASE_URL",
     "LLM_MODEL",
-    "GROQ_API_KEY",
+    "LLM_PROVIDER",
 )
 
 
