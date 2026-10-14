@@ -48,6 +48,18 @@ would be attempted six times before the node ever saw it. Sleeps and jitter are 
 (constructor arguments, with module-level defaults that monkeypatching can replace), so a
 retry test never spends three real seconds.
 
+**Owned client lifetime (ADR-005).** The gateway owns the provider client it builds. That
+ownership is discharged on the gateway's own terms — :meth:`ChatLLM.aclose` — instead of
+being left to the interpreter's garbage collector, which would fire the SDK's ``__del__``
+whenever the collector happened to get to the object. The SDK's finalizer answers
+``asyncio.get_running_loop().create_task(self.aclose())``, so a client collected **after**
+its loop closed schedules a coroutine that can never run and asyncio reports it as
+``Task exception was never retrieved`` — the scary traceback a fully successful keyed run
+prints to stderr. Closing deterministically while the loop is still alive closes the real
+connection pool, so nothing is left for a finalizer to complain about. No warning is
+filtered and no global handler is installed: the requirement is that the pool is closed,
+not that the symptom is silenced.
+
 **Offline-mock contract.** ``MOCK_LLM=1`` makes :func:`build_llm` return
 :class:`src.utils.mock_llm.MockLLM`: deterministic, keyed by a prompt fingerprint, and
 performing no network operation of any kind. That branch imports neither ``openai`` nor any
@@ -65,12 +77,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import random
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
@@ -767,6 +781,26 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     return _retry_after_header(exc) or _retry_after_message(exc)
 
 
+# --- closing the client the gateway owns ------------------------------------------
+#
+# The gateway wraps an ``openai.AsyncOpenAI``, whose async close is spelled ``close()``;
+# the HTTP client one level down spells it ``aclose()``. Both spellings are accepted, in
+# that order, rather than hard-coding one name — the rename the SDK made between the two
+# objects is the kind that happens again. A stub with neither spelling is simply never
+# closed: a test stand-in that opened no socket has nothing to release, and that is the
+# state the existing stub machinery has always been in.
+_CLOSE_SPELLINGS = ("close", "aclose")
+
+
+def _resolve_close(client: Any) -> Callable[[], Awaitable[None]] | None:
+    """The client's async close method under whichever spelling it exposes, or ``None``."""
+    for spelling in _CLOSE_SPELLINGS:
+        candidate = getattr(client, spelling, None)
+        if asyncio.iscoroutinefunction(candidate):
+            return candidate
+    return None
+
+
 class ChatLLM:
     """One OpenAI-compatible chat client with the gateway's retries and accounting.
 
@@ -778,10 +812,23 @@ class ChatLLM:
     to stay in sync with a provider upgrade.
 
     Retries (429/5xx, ``max_attempts = 3``) and the schema-retry are both bounded; the
-    class holds no state beyond its configuration, so one client per ``build_llm`` call is
-    safe to share and trivially reproducible. A 429 that names its own wait (a
+    class holds no per-client state beyond its configuration, so one client per
+    ``build_llm`` call is trivially reproducible. A 429 that names its own wait (a
     ``Retry-After`` header, or Groq's body hint) sleeps that long instead of the backoff,
     up to ``retry_after_cap_s``.
+
+    The client this wraps is *owned*: :func:`build_llm` constructs it and hands it over
+    with nobody else holding a reference, so the gateway is the one place that can close
+    it. Callers discharge that by driving the chat through :meth:`aclose` — directly, or
+    via ``async with build_llm(...) as client`` — so the SDK's connection pool is closed
+    while the loop is still alive. Left to the collector instead, the SDK's ``__del__``
+    schedules ``aclose`` onto whatever loop happens to be running, or none, and a client
+    finalised after its loop closed prints ``Task exception was never retrieved`` for a
+    run that in fact succeeded. :meth:`aclose` is idempotent and closing is not something
+    a caller has to worry about having already happened.
+    Because the client is closed by the call, one gateway serves exactly one chat turn:
+    that is the shape every node already builds in, and it is what keeps one connection
+    pool from outliving the ``asyncio.run`` loop that opened it.
     """
 
     def __init__(
@@ -800,6 +847,9 @@ class ChatLLM:
             raise ValueError("max_attempts must be at least 1")
         self._client = client
         self._model = model
+        # Set by aclose once the underlying client has been closed; every later close is
+        # a no-op, so a caller never has to know whether someone already closed this one.
+        self._closed = False
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._backoff_cap_s = backoff_cap_s
@@ -817,6 +867,59 @@ class ChatLLM:
         """The model requested when a call's ``params.model`` is ``None``."""
         return self._model
 
+    @property
+    def closed(self) -> bool:
+        """Whether the underlying client has been closed by :meth:`aclose`."""
+        return self._closed
+
+    async def aclose(self) -> None:
+        """Close the underlying provider client, exactly once.
+
+        This is what keeps the SDK's garbage-collector finalizer out of the picture. The
+        SDK's ``__del__`` schedules ``aclose()`` on the *currently running* loop, so a
+        client that is collected once that loop has closed schedules a coroutine which can
+        never run, and asyncio reports the abandoned task as
+        ``Task exception was never retrieved`` — a stack trace printed over a run that
+        succeeded. Closing here, while the caller's loop is still alive, closes the real
+        connection pool instead, leaving nothing for a finalizer to complain about.
+
+        The close is idempotent, and a second (or concurrent) call is a no-op rather than
+        a second close on the SDK object nor a raise: a caller that already closed, or two
+        tasks closing one client, is not an error state.
+
+        The relationship being closed is not a *transaction*: nothing is being offered to
+        the provider, so a failure to release the pool must not replace the answer the
+        caller already has, or the error they are already handling. An exception from the
+        close is therefore logged and dropped, never propagated.
+        """
+        if self._closed:
+            return
+        # Claimed before the await so a concurrent closer sees this one as issued. The
+        # SDK's own close is itself idempotent, so even that window is harmless.
+        self._closed = True
+        close = _resolve_close(self._client)
+        if close is None:
+            return
+        try:
+            await close()
+        except Exception as exc:  # the pool failed to release; the result still stands
+            logging.getLogger(__name__).warning(
+                "closing the provider client failed: %s: %s", type(exc).__name__, exc
+            )
+
+    async def __aenter__(self) -> ChatLLM:
+        """Enter the ``async with`` scope; the client it returns closes on exit."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Leave the scope with the client closed, success or failure alike."""
+        await self.aclose()
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -829,15 +932,31 @@ class ChatLLM:
         violation retries once with a stricter nudge appended and then raises
         :class:`SchemaViolationError`. Without it the raw text is returned and ``parsed``
         stays ``None``. ``latency_ms`` covers every attempt, retries included.
+
+        The owned client is closed as this call finishes, success or failure alike. A node
+        calls ``build_llm()`` inline and holds nothing after the call, so without this the
+        SDK's finalizer would be the only thing that ever closes the pool — and it
+        schedules that close on whatever loop happens to be running, which by then is not
+        the one the pool belongs to, so asyncio reports
+        ``Task exception was never retrieved``. Closing here is the same close, performed
+        by the code that owns the object.
         """
         if not messages:
+            # No request was built and no pool was used: nothing to close, and a rejected
+            # call must not raise a second error from the close path on top of this one.
             raise LLMError("chat requires at least one message")
         request = self._build_request(messages, params, schema)
         started = time.perf_counter()
 
-        result = self._to_result(await self._send_with_retries(request))
+        try:
+            result = self._to_result(await self._send_with_retries(request))
+        except Exception as error:
+            # Close before the raise, on the loop that used the pool, so the error a
+            # caller is about to handle never leaves a live connection pool behind.
+            await self.aclose()
+            raise error
         if schema is None:
-            return self._timed(result, started)
+            return await self._finished(self._timed(result, started))
 
         parsed, reason = _parse_structured(result.text, schema)
         if parsed is None:
@@ -845,15 +964,32 @@ class ChatLLM:
             # along as an extra user turn so single-system-message servers accept it.
             retry_messages = [*messages, {"role": "user", "content": _STRICT_NUDGE}]
             retry_request = self._build_request(retry_messages, params, schema)
-            retry_result = self._to_result(await self._send_with_retries(retry_request))
+            try:
+                retry_result = self._to_result(await self._send_with_retries(retry_request))
+            except Exception as error:
+                await self.aclose()
+                raise error
             parsed, reason = _parse_structured(retry_result.text, schema)
             if parsed is None:
-                raise SchemaViolationError(
+                violation = SchemaViolationError(
                     f"model response did not match the requested schema after one stricter "
                     f"retry: {reason}"
                 )
+                await self.aclose()
+                raise violation
             result = retry_result
-        return replace(self._timed(result, started), parsed=parsed)
+        return await self._finished(replace(self._timed(result, started), parsed=parsed))
+
+    async def _finished(self, result: ChatResult) -> ChatResult:
+        """Close the owned client, then hand ``result`` back.
+
+        Closing happens on the success path too, because a node that got its answer holds
+        no reference to the client afterwards and the pool would otherwise wait for the
+        collector. The await is ordered *before* the return so the close is already done
+        when the node's ``asyncio.run`` closes its loop.
+        """
+        await self.aclose()
+        return result
 
     # --- internals ---------------------------------------------------------------
 

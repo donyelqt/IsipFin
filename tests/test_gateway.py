@@ -60,6 +60,7 @@ from src.utils.llm import (
     retry_after_seconds,
     validate_json_schema,
 )
+from src.utils.mock_llm import MOCK_MODEL
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -259,11 +260,20 @@ class StubTransport:
     Canned responses (or exceptions) are returned in order, the last one repeating once
     the list runs out, and every call is recorded with its exact kwargs so a test can
     count attempts and read what the gateway sent. No socket is ever opened.
+
+    The close is recorded, not simulated: the ``AsyncOpenAI`` the gateway really wraps
+    spells its async close ``close()``, and it marks its HTTP client closed so that the
+    SDK's ``__del__`` can early-return instead of scheduling a coroutine onto a loop that
+    is already gone. Tracking both the call count and the resulting state is what lets a
+    test assert the gateway discharged that ownership — exactly once, and before the loop
+    it ran on was closed — without reading log output.
     """
 
     def __init__(self, responses: Sequence[Any] | Any) -> None:
         self._responses = list(responses) if isinstance(responses, Sequence) else [responses]
         self.calls: list[dict[str, Any]] = []
+        self.closes = 0
+        self.closed = False
 
     @property
     def chat(self) -> StubTransport:
@@ -279,6 +289,16 @@ class StubTransport:
         if isinstance(item, BaseException):
             raise item
         return item
+
+    async def close(self) -> None:
+        """The SDK's async close: records the call, and marks the client closed.
+
+        Marking it is what the real SDK does so its ``__del__`` can early-return, so a
+        test that leaves a closed stub to the collector never trips the warning this whole
+        change is about.
+        """
+        self.closes += 1
+        self.closed = True
 
 
 class Sleeper:
@@ -860,6 +880,277 @@ def test_chat_without_messages_is_rejected(mock_mode: None) -> None:
         _run(client.chat([], LLMParams()))
 
     assert transport.calls == [], "an empty conversation must never reach the provider"
+
+
+# --- 6b. the gateway closes the client it owns -------------------------------------
+#
+# The defect these pin: the openai SDK's ``__del__`` answers
+# ``asyncio.get_running_loop().create_task(self.aclose())``. A keyed run builds one client
+# per node inside its own ``asyncio.run``, so the pool belongs to a loop that closes as
+# soon as the turn returns; by the time the collector finalizes the client there is no
+# loop for the scheduled coroutine to run on and asyncio reports
+# ``Task exception was never retrieved`` — a traceback printed over a run that succeeded.
+# The fix is to close the owned client on the loop that used it, which is what
+# ``ChatLLM.aclose`` now does, and the same close runs on the error path so a failed call
+# does not leak the pool.
+#
+# Every test asserts on the client's recorded state, not on log output: silencing the
+# warning without closing would leave the real leak in place, and a log assertion would
+# pass for exactly the non-fix the brief forbids.
+
+
+def test_closing_the_gateway_closes_the_client_exactly_once(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """Ownership is discharged: one close reaches the client, and the turn still answers."""
+    client, transport, _ = _stubbed_client([_completion("ok")])
+
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert result.text == "ok"
+    assert transport.closes == 1, "the client this gateway built must be closed once"
+    # The answer is already computed when the close lands, so closing never replaces it.
+    assert transport.closed is True
+
+
+def test_closing_twice_is_a_no_op_rather_than_an_error(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """A second close is not a second close on the SDK object, nor a raise.
+
+    ``aclose`` is a no-op after the first, so a caller that closes what it was handed —
+    and a caller that closes something the gateway already closed — cannot hand a second
+    ``aclose`` to an object that has already released its pool.
+    """
+    client, transport, _ = _stubbed_client([_completion("ok")])
+    _run(client.chat(_synthesis_messages(), LLMParams()))
+    assert transport.closes == 1, "the chat turn itself must close the client"
+
+    _run(client.aclose())
+    _run(client.aclose())
+
+    assert transport.closes == 1, "the second and third closes must be no-ops"
+    assert client.closed is True
+
+
+def test_a_turn_that_builds_chats_and_closes_leaves_the_client_closed(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The node's own shape: build, drive the coroutine, close — with nothing unretrieved.
+
+    ``asyncio.run`` closes its loop on return, so the close that stops the SDK's
+    finalizer has to happen *inside* that loop. The assertion is on the closed state the
+    loop left behind, which is the observable fact of "the pool will not be finalized on
+    a dead loop" — no log is read, and nothing is suppressed to make this pass.
+    """
+    transport = StubTransport([_completion("ok")])
+    client = ChatLLM(transport, model="stub-model")
+    messages = _synthesis_messages()
+
+    # One loop, exactly like a node's asyncio.run: build inline, chat, close, loop ends.
+    async def turn() -> Any:
+        return await client.chat(messages, LLMParams())
+
+    result = asyncio.run(turn())
+
+    assert result.text == "ok"
+    assert transport.closed, "the client must be closed inside the loop that used it"
+    assert transport.closes == 1
+    assert client.closed
+
+
+def test_the_client_is_closed_even_when_chat_raises(mock_mode: None, purged_openai: None) -> None:
+    """No leak on the error path: a failed turn closes the pool too.
+
+    Every node catches the typed failure and degrades, so this is the path a caller is
+    most likely to handle — and the one that would leak a live pool if the close belonged
+    only to the successful call. The typed error itself is unchanged by the close.
+    """
+    client, transport, _ = _stubbed_client([ProviderStatusError(429, "quota reached")])
+
+    with pytest.raises(LLMError.RateLimited) as raised:
+        _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert raised.value.status == 429
+    assert transport.closes == 1, "a failed chat must not leak the client"
+    assert transport.closed is True
+    # The retry policy ran in full before the close: closing never truncates the attempts.
+    assert len(transport.calls) == 3
+
+
+def test_a_schema_violation_that_never_recovers_still_closes_the_client(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """The strict-retry failure is an error path too: the pool is closed before it raises."""
+    client, transport, _ = _stubbed_client([_completion("not json"), _completion("still not json")])
+
+    with pytest.raises(SchemaViolationError):
+        _run(client.chat(_synthesis_messages(), LLMParams(), QUERY_PLAN_SCHEMA))
+
+    assert len(transport.calls) == 2, "one stricter retry is the whole policy"
+    assert transport.closes == 1
+    assert client.closed
+
+
+def test_the_gateway_closes_a_client_whose_close_raises_without_losing_the_result(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """A pool that fails to release is logged, not turned into a second failure.
+
+    Closing releases a resource; it offers nothing to the provider. So a close that
+    itself raises must not replace the answer the caller already has — the result stands
+    and the failure is reported for a human, not raised into the turn.
+    """
+
+    class UnclosableTransport(StubTransport):
+        """A stub whose close fails the way a half-dead connection pool can."""
+
+        async def close(self) -> None:
+            raise RuntimeError("pool already gone")
+
+    client = ChatLLM(UnclosableTransport([_completion("ok")]), model="stub-model")
+
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert result.text == "ok", "the answer must survive a failed close"
+    assert client.closed is True, "the gateway still considers the client closed"
+
+
+def test_closing_a_client_with_no_close_method_at_all_is_a_no_op(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """A stub with no lifetime is closed by doing nothing: it never opened a pool.
+
+    The close spellings are a property of the object the caller supplied, so a stub
+    without either one is left exactly as the SDK's finalizer left it — never an error.
+    """
+
+    class BareTransport:
+        """The chat surface only: no close, because there is nothing to release."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        @property
+        def chat(self) -> BareTransport:
+            return self
+
+        @property
+        def completions(self) -> BareTransport:
+            return self
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return _completion("ok")
+
+    client = ChatLLM(BareTransport(), model="stub-model")
+
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+
+    assert result.text == "ok"
+    assert client.closed is True
+
+
+def test_closing_through_the_async_context_manager_closes_the_client(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """``async with build_llm(...) as client`` discharges the ownership on exit.
+
+    The chat call closes the client it is using, so the ``__aexit__`` close has nothing
+    left to do: the point of the context manager is that leaving the scope is always safe
+    for a gateway that already discharged its own ownership, and never closes twice.
+    """
+    transport = StubTransport([_completion("ok")])
+
+    async def turn() -> tuple[str, bool]:
+        async with ChatLLM(transport, model="stub-model") as client:
+            result = await client.chat(_synthesis_messages(), LLMParams())
+            inside = client.closed
+        return result.text, inside
+
+    text, closed_inside = asyncio.run(turn())
+
+    assert text == "ok", "the chat call answers normally inside the scope"
+    # The chat call already discharged the ownership, so the scope exit re-closes nothing:
+    # exactly one close reached the client for the whole turn.
+    assert closed_inside is True
+    assert transport.closes == 1, "the scope exit must not close a second time"
+    assert transport.closed is True
+
+
+def test_a_closed_gateway_does_not_close_the_client_a_second_time(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """One turn, one close: an explicit close after a chat turn is still a no-op.
+
+    This is the double-discharge a real caller can produce by doing both — driving the
+    chat and then closing what it was handed — and the close count says whether the
+    gateway's idempotence is real or only claimed.
+    """
+    transport = StubTransport([_completion("ok")])
+    client = ChatLLM(transport, model="stub-model")
+
+    async def turn() -> str:
+        async with client as gateway:
+            result = await gateway.chat(_synthesis_messages(), LLMParams())
+        # And the caller closes what it was handed, after the scope already closed it.
+        await gateway.aclose()
+        return result.text
+
+    text = asyncio.run(turn())
+
+    assert text == "ok"
+    assert transport.closes == 1, "chat, scope exit and an explicit close cost one close"
+    assert transport.closed is True
+
+
+def test_mock_llm_is_untouched_by_the_close_path(mock_mode: None) -> None:
+    """The mock has no client to close and gains no close path.
+
+    It must answer exactly as it did before and carry no client of any kind, so nothing
+    about the fix changes the offline path — the same determinism, the same fields, and
+    no ``closed`` attribute that was not there.
+    """
+    from src.utils.mock_llm import MockLLM
+
+    client = build_llm(LLMParams())
+
+    assert isinstance(client, MockLLM)
+    assert not hasattr(client, "closed"), "the mock must not grow the gateway's close state"
+    assert not hasattr(client, "aclose"), "the mock must not grow a close method"
+    assert not hasattr(client, "client"), "the mock has no provider client to expose"
+    # Its answer is unchanged: the frozen six fields, the deterministic figure, no client.
+    result = _run(client.chat(_synthesis_messages(), LLMParams()))
+    assert result.text == _run(mock_client().chat(_synthesis_messages(), LLMParams())).text
+    assert result.parsed is None
+    assert result.model == MOCK_MODEL
+    # A mock client is reused across calls by the same test and the demo: calling it twice
+    # must not need, or gain, anything that closes.
+    assert _run(client.chat(_synthesis_messages(), LLMParams())) == result
+
+
+def test_every_chatllm_construction_path_closes_the_client(
+    mock_mode: None, purged_openai: None
+) -> None:
+    """Both the success and the error path close, for one gateway built the way nodes do.
+
+    A fresh gateway per turn is the deliberate pattern, so this walks the whole turn —
+    build, chat, close — twice, the second time failing, and asserts the same close count
+    on both. One turn never closes a client twice, and two turns never share one.
+    """
+    answered, failed = StubTransport([_completion("ok")]), StubTransport(
+        [ProviderStatusError(500, "backend down")]
+    )
+
+    good = ChatLLM(answered, model="stub-model")
+    bad = ChatLLM(failed, model="stub-model")
+
+    _run(good.chat(_synthesis_messages(), LLMParams()))
+    with pytest.raises(LLMError):
+        _run(bad.chat(_synthesis_messages(), LLMParams()))
+
+    assert (answered.closes, failed.closes) == (1, 1)
+    assert (answered.closed, failed.closed) == (True, True)
 
 
 # --- 7. the revenue figure, exactly, through the mock ------------------------------
