@@ -80,7 +80,7 @@ flowchart TD
 | Node | Reads (state) | Writes (state) | LLM? | Notes |
 |---|---|---|---|---|
 | `contextualize_question` | `question`, `history` | `standalone_question` | yes, cheap model | runs only when follow-up heuristic fires; on LLM error falls back to raw question |
-| `analyze_question` | `standalone_question`, `doc_catalog` | `query_plan` | yes, JSON schema | emits `kind ∈ {simple, multi_part, out_of_scope}`, `sub_queries[]`, `required_sections[]` |
+| `analyze_question` | `standalone_question`, `doc_catalog` | `query_plan`, `planner_degraded` | conditional — the symbolic year-coverage gate runs first, then yes, JSON schema | emits `kind ∈ {simple, multi_part, out_of_scope}`, `sub_queries[]`, `required_sections[]`; a `planner_degraded`-marked `out_of_scope` is a failed planner call, not a reasoned scope decision |
 | `decompose_question` | `query_plan` | `sub_queries[]` | no (rule-based split of plan) | caps fan-out at 4 sub-queries |
 | `hybrid_retrieve` | `sub_queries` (or single question) | `retrieved: list[ScoredChunk]` | no | `retrieve()` per sub-query, RRF merge, top-k parents |
 | `synthesize_answer` | `retrieved`, `standalone_question`, `history` | `answer_md`, `citations` | yes | citation-constrained prompt (`docs/prompts/answer-synthesis-with-citations.md`) |
@@ -95,7 +95,14 @@ and the deterministic checker's limits are in `docs/adr/ADR-010-neuro-symbolic-p
 Deterministic predicates live in `src/chains/checks.py` (pure, unit-tested, no network).
 
 Routing rules: `out_of_scope` (question about content no uploaded doc covers, per `doc_catalog`
-section listing) skips retrieval entirely — no LLM call. Simple queries skip decomposition.
+section listing) skips retrieval entirely — no LLM call. A question naming exactly one fiscal
+year the catalog cannot cover is settled earlier still, by `checks.year_coverage_gap` inside
+`analyze_question` before any POST: it routes to `refuse` with `missing_aspect=time_period` and
+costs no planner call at all — golden case q09 ("What was revenue in FY2019?") refuses in 6.7 ms
+with zero LLM calls, where the pre-gate path took 9,812.7 ms and classified on a coin flip. The
+gate never overrides the planner otherwise: a comparison (several periods asked), an entity- or
+topic-gap question, and a period-less question stay the planner's judgement. Simple queries skip
+decomposition.
 Multi-part queries retrieve once per sub-query (max 4, sequential with the shared gateway
 budget). Score gate `tau` (default 0.02 RRF) triggers exactly **one** query rewrite retry, never
 an unbounded loop — bounded cost, no infinite retry.
@@ -134,7 +141,7 @@ banner — never an empty answer.
 | Path | Content |
 |---|---|
 | `data/pdfs/<doc_id>.pdf` | uploaded corpus copy |
-| `data/index/faiss/` | FAISS vector index for child chunks |
+| `data/index/faiss/` | one FAISS vector index for child chunks: `index.faiss` (the vectors) plus `meta.json` (dimension + vector count, so a stale artifact is detected instead of trusted) |
 | `data/index/bm25.pkl` | pickled BM25Okapi over child token lists |
 | `data/index/chunks.jsonl` | one record per chunk: ids, texts, page, section_path, parent link, scores-free |
 | `data/index/docs.jsonl` | `DocSummary` catalog (doc_id, filename, sha256, page_count, sections) |
@@ -163,7 +170,7 @@ events(id INTEGER PK, session_id TEXT, turn_id INTEGER, ts TEXT, event TEXT, pay
 |---|---|
 | `doc-ingest` | `src/core/pdf_parser.py`, `src/core/tables.py` |
 | `chunking-index` | `src/core/chunking.py`, `src/core/index.py`, `src/core/retrieval.py` |
-| `llm-gateway` | `src/utils/llm.py`, `src/utils/errors.py`, `src/utils/settings.py` |
+| `llm-gateway` | `src/utils/llm.py` (also holds the typed error taxonomy — `src/utils/errors.py` was never created), `src/utils/settings.py` |
 | `orchestration` | `src/chains/nodes/*.py`, `src/chains/graph.py`, `src/chains/state.py` |
 | `chat-store` | `src/store/db.py`, `src/store/sessions.py` |
 | `app-ui` | `app.py`, `src/components/*.py` |

@@ -30,9 +30,19 @@ same fields:
 `synthesis.complete`, `numeric_prepass.trimmed`, `grounding.trimmed`, `refusal.issued`,
 `upload.parsed`, `session.switched`.
 Anything not in the vocabulary goes in `extra`, never as a new top-level `event` type.
+
+**Implemented today:** only `upload.parsed` is ever written, from `src/components/upload.py`'s
+`_record_upload_events` (one `events` row per indexed document). The `node.<name>` /
+`node.<name>.error` shapes are **not emitted as `events` rows either** — a node run is recorded
+as a `NodeEvent` and persisted per assistant message in `messages.node_trace_json`, which is not
+the same column as the `events` stream. Every other name above is aspirational vocabulary for a
+sink that does not yet exist: nothing in `src/` emits `graph.start`, `retrieval.query`,
+`synthesis.complete`, `numeric_prepass.trimmed`, `grounding.trimmed`, `refusal.issued` or
+`session.switched`, so a reader greps the `events` table for them and finds nothing.
 `numeric_prepass.trimmed` is the deterministic checker firing (`extra`: `{ "claim": "...",
 "reason": "figure_not_in_span | period_mismatch" }`) — evidence in the UI that a wrong figure was
-caught without a model call (ADR-010).
+caught without a model call (ADR-010). It stays the documented name for what the vocabulary
+*specifies*, not a claim about what a run writes.
 
 ## Node trace (`GraphState.node_trace`)
 
@@ -43,8 +53,8 @@ NodeEvent(node: str, started_at: float, duration_ms: float,
           tokens_in: int | None, tokens_out: int | None, error: str | None)
 ```
 
-- persisted per assistant message in `messages.node_trace_json`,
-- mirrored into the `events` table,
+- persisted per assistant message in `messages.node_trace_json` (the `events` table is a
+  separate sink and holds no node-trace rows today),
 - rendered by the debug panel for **any** message the user selects, not just the latest.
 
 ## Debug panel contract
@@ -63,9 +73,12 @@ this answer" rather than drawing an empty block. For the selected answer:
    decomposed / refused) highlighted.
 3. **Retrieval** — for each selected chunk: dense score, sparse score, fused RRF score, parent
    page range, section path, and a 200-char snippet. Sorted by fused score.
-4. **Grounding** — deterministic pre-pass verdicts first (`figure_not_in_span` /
-   `period_mismatch` rejections, trimmed before any model call), then per-claim LLM verdicts
-   (supported / partially / unsupported), with trimmed claims marked.
+4. **Grounding** — the `grounded` flag (badge: grounded / ungrounded), the `refusal_reason`, the
+   citation count, and the `planner_degraded` badge where the live answer carries it. It does
+   **not** render verdicts: the deterministic pre-pass rejections and the per-claim LLM verdicts
+   are not carried on the answer record — they surface only through the node events and the
+   answer text — so the section says so with an explicit note rather than inventing a verdict
+   count (ADR-007).
 
 This panel is the demo artifact for the observability criterion: a reviewer can verify *why* an
 answer was produced without reading logs.
@@ -74,12 +87,12 @@ answer was produced without reading logs.
 
 | Metric | Computed from | Surfaced in |
 |---|---|---|
-| Per-node latency p50/p95 | `NodeEvent.duration_ms` | debug panel (session-scoped) |
-| Tokens in/out per turn | gateway accounting in `NodeEvent` | debug panel |
-| Retrieval score distribution | `retrieval_debug` fused scores | debug panel sparkline |
-| Groundedness-failure rate | `grounded` flags on messages | journal §6 |
-| Refusal rate | `refusal_reason` histogram | journal §6 |
-| Path mix | `query_plan.kind` counts | journal §6 |
+| Per-node latency | `NodeEvent.duration_ms`, as the per-node ms the path list renders for one selected answer | debug panel (per selected answer; no p50/p95 aggregate, and no cross-session scope) |
+| Tokens in/out per turn | gateway accounting lifted into `NodeEvent` | debug panel (per node row, for the live answer) |
+| Retrieval score distribution | `retrieval_debug` fused scores | debug panel (per retrieved card: `dense · sparse · fused` text, plus the 0-based rank; **no sparkline**, and the fused score itself is absent from a stored answer) |
+| Groundedness-failure rate | `grounded` flags on messages | not surfaced — the panel shows one answer's flag, the aggregate is not computed anywhere in the app |
+| Refusal rate | `refusal_reason` values on messages | not surfaced as an aggregate — the panel names one answer's refusal reason |
+| Path mix | `query_plan.kind` | debug panel (the route badge inferred from which nodes ran: simple / decomposed / refused — not a `kind` count, and only for the live answer whose plan is carried) |
 
 ## Logging rules
 

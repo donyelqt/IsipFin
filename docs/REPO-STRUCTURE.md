@@ -6,7 +6,10 @@
 > **Shipped vs pending.** Every unmarked file below exists in the working tree today. Lines
 > marked `⏳ pending` are planned by `docs/PLAN.md` but have not been built yet — the planned
 > task id is named so the gap is unambiguous. Phase 4 (`app.py` + `src/components/`) is
-> shipped; Phase 5's packaging files (T22–T24) are written on disk but not yet committed.
+> shipped; Phase 5's packaging files (T22–T24) exist on disk **and are committed** (an earlier
+> version of this note called them uncommitted; `git ls-files` lists `Dockerfile`,
+> `docker-compose.yml`, `README.md`, `requirements.txt`, `requirements-dev.txt`,
+> `pyproject.toml`, `AGENTS.md` and `.github/workflows/ci.yml`).
 > Nothing is described as shipped that is not on disk.
 
 ```
@@ -27,6 +30,10 @@
 │   │   ├── upload.py               # ingest surface (T18): multi-PDF uploader, index-build
 │   │   │                            #   progress, document catalog, per-file status and
 │   │   │                            #   error cards (T21)
+│   │   ├── debug_panel.py           # Diagnostics (T20): plan, path, retrieval, grounding for
+│   │   │                            #   the selected answer (live envelope or stored message)
+│   │   ├── errors.py                # failure classification + error banner (T21) — see the
+│   │   │                            #   ownership notes below
 │   │   └── sidebar.py              # left rail (T19): brand row, primary action, 4-view nav
 │   │                               #   (Documents, Retrieval, Parameters, Diagnostics), session
 │   │                               #   manager, index-sourced workspace status card; renders the
@@ -39,7 +46,9 @@
 │   │   │                            #   table work landed inside pdf_parser.py instead
 │   │   ├── chunking.py             # parents/children, atomic tables, page ranges (ADR-002)
 │   │   ├── index.py                # FAISS + BM25 build/load; chunks.jsonl source of truth
-│   │   └── retrieval.py            # hybrid retrieve(), RRF fusion, parent expansion
+│   │   ├── retrieval.py            # hybrid retrieve(), RRF fusion, parent expansion
+│   │   └── local_embedder.py       # cached fastembed embedder (get_local_embedder),
+│   │                               #   LocalEmbeddingError — named by no PLAN.md task row
 │   ├── chains/                     # orchestration (T9–T16)
 │   │   ├── state.py                # GraphState TypedDict (frozen in docs/ARCHITECTURE.md)
 │   │   ├── graph.py                # StateGraph wiring, edges, conditional routing (ADR-001)
@@ -73,9 +82,10 @@
 │   │                               #   repo-root .env reaches MOCK_LLM, OPENAI_API_KEY,
 │   │                               #   base-url/model (src/utils/settings.py)
 │   ├── check_floor.py              # floor guard — enforces docs/CONSTRAINTS.md on added lines
-│   ├── prompts_meta.json          # per-node prompt version/temperature registry
+│   ├── prompts_meta.json           # per-node prompt version/temperature registry
 │   ├── eval_rag.py                 # golden QA runner (T17) — ships; runs invoke() over
-│   │                              #   tests/data/golden_qa.jsonl, exits nonzero on regression
+│   │                               #   tests/data/golden_qa.jsonl, exits nonzero on regression;
+│   │                               #   two modes: MOCK_LLM=1 hermetic, or a keyed real LLM
 │   └── demo_script.py              # the 6-step demo run (STRESS-TEST-DELIVERY.md)
 ├── tests/                          # hermetic pytest suite (TESTING-AND-EVAL.md)
 │   ├── test_parser.py      # Block/ParsedDocument parse + table markdown
@@ -84,6 +94,14 @@
 │   ├── test_gateway.py    # build_llm, retry/backoff, typed errors, MOCK_LLM scripts
 │   ├── test_store.py      # SQLite sessions, messages, citations, events
 │   ├── test_prompts.py    # header parse, version assertions, node/prompt registry
+│   ├── test_settings.py   # env precedence, REPO_ROOT resolution
+│   ├── test_errors.py     # failure classification / render_error
+│   ├── test_nodes_analyze.py    # planner classification, year-coverage gate, degraded marker
+│   ├── test_nodes_verify.py     # claim-level grounding verdicts (ADR-010)
+│   ├── test_degraded_planner_marker.py  # planner_degraded end-to-end through the envelope
+│   ├── test_answer_survives_store_failure.py  # answer rendered when the store cannot be written
+│   ├── test_doc_summary_sections.py  # catalog DocSummary section reading
+│   ├── test_eval_rag.py  # eval harness verdict/exit logic (mock mode, hermetic)
 │   ├── fixtures.py       # shared fixtures (no test_ prefix → not collected)
 │   └── data/golden_qa.jsonl  # golden QA dataset (T17) — ships; 10 cases incl. the
 │                             #   year-confusion and adjacent-year canaries
@@ -102,7 +120,10 @@
 ├── .github/workflows/ci.yml        # one job: ruff + black + mypy + floor guard + pytest with
 │                                   #   coverage + docker build smoke (T23)
 ├── requirements.txt                # pinned (T1)
+├── requirements-dev.txt            # dev toolchain (ruff/black/mypy/pytest); installed in the
+│                                   #   Dockerfile builder stage and in CI, never the runtime image
 ├── pyproject.toml                  # setuptools + ruff/black/pytest/mypy config (T1)
+├── AGENTS.md                       # agent-facing repo rules; named by no PLAN.md task row
 └── README.md                       # reviewer quick start, corpus, repo layout, commands,
                                     #   honest limitations (T24)
 ```
@@ -111,7 +132,7 @@
 
 | Path | Module | Task |
 |---|---|---|
-| `src/core/pdf_parser.py`, `chunking.py`, `index.py`, `retrieval.py` | doc-ingest, chunking-index | T2–T5 |
+| `src/core/pdf_parser.py`, `chunking.py`, `index.py`, `retrieval.py`, `local_embedder.py` | doc-ingest, chunking-index | T2–T5 |
 | `src/utils/llm.py`, `mock_llm.py`, `prompts.py`, `settings.py` | llm-gateway | T6 |
 | `src/store/db.py`, `sessions.py` | chat-store | T7 |
 | `prompts/*.md` | (prompt assets — spec in `docs/prompts/`) | T8 |
@@ -140,7 +161,7 @@ created.** Both now exist, and both are wired; the bullets note the one limit th
   neither. The same work closed a stale-live bug: `_LAST_SESSION_KEY` gates the live
   envelope to its own session, so a conversation switch can no longer show one
   conversation's live panel under another's name.
-- `src/components/errors.py` (T21) also exists (322 lines) and **is wired**: `app.py` imports
+- `src/components/errors.py` (T21) also exists (419 lines) and **is wired**: `app.py` imports
   it and routes both catch-alls that render a banner through it — a failed transcript read
   calls `errors.render_error(exc)`, and a failed turn calls `errors.classify_error(exc)` then
   `errors.render_error(exc, on_retry=view.retryable)` — so the banner and its Retry action

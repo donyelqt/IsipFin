@@ -49,8 +49,8 @@ myself.*
 | Layer | Choice | Rationale (see ADR) |
 |---|---|---|
 | Language / runtime | Python 3.11+ (`.venv`, pinned `requirements.txt`) | ecosystem, reviewer familiarity |
-| Orchestration | **LangGraph** (`langgraph` standalone package, `StateGraph` + `MessagesState`), narrow use of LangChain primitives for splitters/retrievers only | ADR-001 |
-| LLM access | OpenAI-compatible `ChatOpenAI`-style client via `base_url` (OpenAI / Azure OpenAI / vLLM / Ollama); embeddings from same provider | ADR-005 |
+| Orchestration | **LangGraph** (`langgraph` standalone package, `StateGraph` over a local `GraphState` — no `MessagesState`), narrow use of LangChain primitives for splitters/retrievers only | ADR-001 |
+| LLM access | OpenAI-compatible `ChatOpenAI`-style client via `base_url` (OpenAI / Azure OpenAI / vLLM / Ollama); chat and embeddings are separate settings — `EMBEDDING_PROVIDER=local` (`fastembed`, the default, in-process, no key) or `api` for the OpenAI-compatible path | ADR-005 |
 | Extraction | `pypdf` (+ `pdfplumber` fallback for table pages) | ADR-004 |
 | Splitting | `RecursiveCharacterTextSplitter` for child chunks; structure-aware parents from detected headings | ADR-002 |
 | Retrieval | **FAISS** (dense) + **rank_bm25** (sparse), Reciprocal Rank Fusion; parent-document expansion | ADR-002 |
@@ -65,7 +65,7 @@ database to store and search document content"* — satisfied by FAISS. Vectorle
 (tree/PageIndex-style) is **evaluated and explicitly rejected** in ADR-003 with measurements,
 not hand-waved.
 
-## 3. Commands (target state — after Phase 1 of `docs/PLAN.md`)
+## 3. Commands (current state — Phase 1 of `docs/PLAN.md` is done)
 
 ```bash
 # Setup
@@ -81,7 +81,7 @@ python scripts/build_index.py                        # index data/pdfs/*.pdf →
 streamlit run app.py                                   # http://localhost:8501
 
 # Test / lint
-pytest -q                                              # full suite (304 tests, 6 files)
+pytest -q                                              # full suite (634 tests, 15 files)
 pytest -q tests/test_retrieval.py -k rrf               # focused: RRF fusion arithmetic
 pytest -q tests/test_store.py -k citation              # focused: citation persistence
 ruff check src tests scripts app.py && black --check src tests scripts app.py
@@ -104,12 +104,13 @@ never be installed as corpus. The PDF itself is gitignored (`.gitignore`: `*.pdf
 ```
 ├── app.py                     # Streamlit entrypoint; thin, no business logic
 ├── src/
-│   ├── components/            # UI-only components (Phase 4 — T18-T21, not yet built)
+│   ├── components/            # seven modules: chat, upload, sidebar, theme, errors, debug_panel, __init__
 │   ├── core/                  # doc-ingest + chunking-index modules
 │   │   ├── pdf_parser.py      # parse_pdf() → Block/ParsedDocument, ParseError
 │   │   ├── chunking.py        # chunk_document() → ParentChunk/ChildChunk
 │   │   ├── index.py           # ChunkIndex: build, save, load, replace_document
-│   │   └── retrieval.py       # HybridRetriever: RRF fusion, parent expansion, filters
+│   │   ├── retrieval.py       # HybridRetriever: RRF fusion, parent expansion, filters
+│   │   └── local_embedder.py  # EMBEDDING_PROVIDER=local: fastembed BAAI/bge-small-en-v1.5, LocalEmbeddingError
 │   ├── chains/                # LangGraph nodes, graph builder, prompt assembly
 │   │   ├── state.py           # GraphState, NodeEvent, AnswerEnvelope, Citation
 │   │   ├── checks.py          # deterministic numeric verification pre-pass
@@ -123,11 +124,11 @@ never be installed as corpus. The PDF itself is gitignored (`.gitignore`: `*.pdf
 │   │   └── tracing.py         # @trace_node → node_trace (ADR-007 §2)
 │   └── store/                 # chat-store: SQLite schema + accessors
 ├── scripts/                   # download_corpus.py, build_index.py, demo_script.py, check_floor.py
-├── tests/                     # pytest: parser, chunking, retrieval, gateway, store, prompts
+├── tests/                     # pytest: 15 files — parser, chunking, retrieval, gateway, store, prompts, nodes
 ├── data/                      # gitignored runtime: PDFs, FAISS/BM25 artifacts, chat.sqlite3
-├── docs/                      # this spec, ADRs, plan, journal seed
-├── Dockerfile                 # Phase 5 (T22) — not yet built
-├── docker-compose.yml         # Phase 5 (T22) — not yet built
+├── docs/                      # this spec, ADRs, plan, journal seed, LOCAL-INFERENCE, NV-INFERENCE
+├── Dockerfile                 # two-stage build; runtime uid=10001, FASTEMBED_CACHE_PATH, HEALTHCHECK
+├── docker-compose.yml         # one app service, named data:/app/data volume, full env passthrough
 ├── .env.example
 └── requirements.txt
 ```
@@ -175,8 +176,8 @@ is the worked reference for all of it.
   node's module owns `logger = logging.getLogger(__name__)` and logs degradations through it,
   tagging records with `extra={"node": NODE_NAME, ...}` so the emitted context (target: `ts`,
   `level`, `trace_id`, `session_id`, `node`) identifies the run. The JSON formatter /
-  `setup_logging` described in ADR-007 §1 is **not built** (Phase 4, with the UI) — until
-  then the stdlib records are the observability output, alongside the per-node trace in
+  `setup_logging` described in ADR-007 §1 is still **not built** — the stdlib records are the
+  observability output, alongside the per-node trace in
   `NodeEvent` (see §9). `LOG_JSON` therefore names nothing: no module reads it
   (`grep -rn LOG_JSON --include="*.py" .` returns no matches), so it was removed from
   `Dockerfile` and `docker-compose.yml` and is documented as unbuilt here rather than
@@ -207,7 +208,7 @@ def retrieve(query: str, k: int = 8, filters: dict | None = None) -> list[Scored
 
 Every test is hermetic — no network, no API key. The offline scripted gateway
 (`MOCK_LLM=1` → `src/utils/mock_llm.py`) and an injected fake embedder are the seams that make
-that possible. Six files, all under `tests/`, all collected by `pytest -q` (304 tests):
+that possible. Fifteen files, all under `tests/`, all collected by `pytest -q` (634 tests):
 
 | File | Covers |
 |---|---|
@@ -217,23 +218,40 @@ that possible. Six files, all under `tests/`, all collected by `pytest -q` (304 
 | `tests/test_gateway.py` | **llm-gateway**: the frozen `ChatResult` fields and mock determinism (across calls *and* across processes), the keyless `MOCK_LLM=1` path importing no `openai`, retry policy (429/5xx retried; auth, context-length and timeout never), exponential backoff arithmetic, schema-mode single strict retry, token/latency accounting, the exact FY2023 revenue figure through the mock, and the real keyed path built from the environment |
 | `tests/test_store.py` | **chat-store**: the six documented tables with columns *in order*, WAL + foreign-key pragmas, schema idempotency, session lifecycle reloaded through a fresh connection, delete cascade, the history window, per-session 1-based gap-free `seq`, unknown ids raising rather than no-oping, two connections on one file, the events stream, and the document registry |
 | `tests/test_prompts.py` | **prompt assets**: all five prompts (P1–P5) load with a complete semver header, the minimum-version floor, unknown-id rejection, node/meta agreement, no prompt text duplicated into `src/`, numeric version comparison, and header-parsing edge cases |
+| `tests/test_nodes_analyze.py` | **analyze node**: classification and routing, including the fiscal-year coverage gate running before any planner POST |
+| `tests/test_nodes_verify.py` | **verify node**: groundedness checks and the deterministic numeric pre-pass |
+| `tests/test_eval_rag.py` | **golden-QA harness**: both modes, degradation reporting, pacing and exit codes (`tests/` also holds `test_settings.py`, `test_errors.py`, `test_degraded_planner_marker.py`, `test_doc_summary_sections.py`, `test_answer_survives_store_failure.py`) |
 
 - **Graph tests (scripted LLM):** routing correctness (simple/multi-part/refusal), follow-up
   contextualization, decomposition fan-out, and citation completeness are driven end to end by
   `scripts/demo_script.py` (T16), which runs the graph's nodes in the graph's own order under
-  `MOCK_LLM=1` against the real persisted index. Dedicated per-node unit tests land with the
-  graph nodes in Phase 3 of `docs/PLAN.md`; `pytest` itself holds the six hermetic unit files
-  above, and `testpaths = ["tests"]` keeps network-touching golden QA out of the suite.
+  `MOCK_LLM=1` against the real persisted index. The graph nodes also carry their own per-node
+  unit files (`tests/test_nodes_analyze.py`, `tests/test_nodes_verify.py`); `pytest` itself
+  holds the fifteen hermetic unit files above, and `testpaths = ["tests"]` keeps
+  network-touching golden QA out of the suite.
 - **Golden QA eval:** `scripts/eval_rag.py` (T17) runs the fixed question set in
   `tests/data/golden_qa.jsonl` end to end through real `invoke()` calls over the real
-  persisted index in `data/index/` — nothing is mocked. It reports retrieval hit-rate@5
-  (bar ≥ 0.9), citation presence (1.0), figure match (≥ 0.95), wrong-year contamination
-  (0, hard fail) and refusal correctness, and exits nonzero on a golden regression.
-  Under `MOCK_LLM=1` it runs hermetically with no key; mock-mode retrieval metrics are
-  reported `N/A (mock mode)` with the reason rather than silently passed. It is deliberately
-  outside `pytest`'s `testpaths`. See `docs/TESTING-AND-EVAL.md`.
-- **UI smoke:** launch Streamlit, upload corpus, ask the revenue question, assert cited answer
-  appears (scripted via Playwright or documented manual step) — lands with Phase 4.
+  persisted index in `data/index/`. It reports retrieval hit-rate@5 (bar ≥ 0.9), citation
+  presence (1.0), figure match (≥ 0.95), wrong-year contamination (0, hard fail) and refusal
+  correctness, and exits nonzero on a golden regression. It has two modes: under
+  `MOCK_LLM=1` it runs hermetically with no key, and every metric that mode cannot measure is
+  reported `NA` with the reason beside it (except the wrong-year canary, which is lexical and
+  can still fail); keyed mode scores the full metric set. A case whose planner could not
+  run — a 429, auth, context-length or timeout refusal — is reported as **not measured** and
+  excluded from its metrics, never scored as a semantic verdict, and it still drives exit 1
+  (`EXIT_REGRESSION`), so a degraded case can never be laundered into a pass. A real-LLM run
+  is *paced*: before each case the harness projects the token cost the next case will add and
+  waits for room in the rolling window against the per-minute ceiling `EVAL_TPM_LIMIT`
+  (default 8000) and the daily ceiling `EVAL_TPD_LIMIT` (default 200000), with
+  `EVAL_TPD_BUDGET` (tokens for today) / `EVAL_TPD_FRACTION` (fraction of the daily ceiling,
+  default 1.0) sizing the day's usable share and `EVAL_TPD_OVERRIDE=1` disabling that
+  pre-flight daily gate; it prints the arithmetic so a reader can tell a wait from a hang.
+  The pacer never re-scores a throttled case — a 429 still costs a wait, not a verdict.
+  Under `MOCK_LLM=1` the pacer is inert — no projection, no window, no sleep, no token line.
+  It is deliberately outside `pytest`'s `testpaths`. See `docs/TESTING-AND-EVAL.md`.
+- **UI smoke:** launch Streamlit, upload corpus (or run `scripts/build_index.py`), ask the
+  revenue question and confirm the cited answer appears — the documented manual path is
+  `docs/RUNBOOK.md`; the docker path is smoke-tested by a `docker build` in CI.
 - Coverage bar: every module in the capability map has at least one unit test file; graph nodes
   have one test each. No coverage-percentage target — behavior coverage, not line coverage.
 
@@ -348,9 +366,14 @@ def invoke(question: str, history: list[Turn], params: LLMParams) -> AnswerEnvel
 
 ## 11. Open Questions (implementation-phase, do not block planning)
 
-- Embedding dimensionality/model default — `text-embedding-3-small` (shipped, overridable via
-  `EMBEDDING_MODEL` / `EMBEDDING_BASE_URL`); `MOCK_LLM=1` instead uses the 64-dim offline
-  embedder in `scripts/build_index.py`.
+- ~~Embedding dimensionality/model default~~ — **resolved and shipped**: embeddings are a
+  separate setting from chat. `EMBEDDING_PROVIDER=local` (the default) runs `fastembed`
+  0.9.0 with `BAAI/bge-small-en-v1.5` (384-dim) in-process via
+  `src/core/local_embedder.py`, with no key; `EMBEDDING_PROVIDER=api` is the
+  OpenAI-compatible path (`EMBEDDING_BASE_URL` / `EMBEDDING_MODEL`, default
+  `text-embedding-3-small`). `MOCK_LLM=1` instead uses the offline deterministic embedder in
+  `scripts/build_index.py`. Guidance and measurements: `docs/LOCAL-INFERENCE.md`,
+  `docs/NV-INFERENCE.md`.
 - ~~Whether to ship a mock-LLM mode~~ — **resolved and shipped**: `MOCK_LLM=1` returns
   `src/utils.mock_llm.MockLLM`, a deterministic, keyless, network-free scripted gateway
   (ADR-005). It doubles as the graph-test double and is documented in `docs/prompts/README.md`.
