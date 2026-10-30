@@ -6,9 +6,9 @@
 
 ## Objective
 
-A Streamlit chat application that ingests financial PDFs (Microsoft FY2023 Annual Report as the
+A Streamlit chat app that ingests financial PDFs (Microsoft FY2023 Annual Report as the
 reference corpus) and answers natural-language questions with concise, citation-backed answers,
-built on a LangGraph agentic RAG pipeline with production-grade error handling and observability.
+on a LangGraph hybrid-RAG pipeline with production-grade error handling and observability.
 
 ## Module Map
 
@@ -16,8 +16,8 @@ built on a LangGraph agentic RAG pipeline with production-grade error handling a
 |---|---|---|---|
 | `doc-ingest` | PDF open, text/page extraction, cleaning, table extraction, heading/section detection, provenance metadata | `ParsedDocument`, `Block[]` (text/table, page, section path) | — |
 | `chunking-index` | Parent-child chunking, hybrid index build (dense + BM25), persistence + reload, re-ingest/dedup by content hash | `Chunk[]`, `HybridIndex` (retrieval API + artifacts under `data/`) | `doc-ingest` |
-| `llm-gateway` | Provider-agnostic chat client (OpenAI-compatible `base_url`, Azure, local vLLM/Ollama), JSON-schema outputs, streaming, retries/backoff, token+latency accounting | `LLMClient`, `ChatResult`, typed errors | — |
-| `orchestration` | LangGraph graph: query contextualization, analysis/planning, decomposition, hybrid retrieval + parent expansion, citation synthesis, groundedness self-check, formatting | `GraphState`, compiled graph, node functions | `chunking-index`, `llm-gateway` |
+| `llm-gateway` | Provider-agnostic chat client (OpenAI-compatible `base_url`, Azure, local vLLM/Ollama), JSON-schema outputs, retries/backoff, token+latency accounting | `LLMClient`, `ChatResult`, typed errors | — |
+| `orchestration` | LangGraph graph: context, analysis/planning, decomposition, retrieval + parent expansion, citation synthesis, groundedness self-check | `GraphState`, compiled graph, node functions | `chunking-index`, `llm-gateway` |
 | `chat-store` | Sessions/turns/messages/events tables, document registry, LangGraph checkpointer binding | SQLite schema + accessors (`data/chat.sqlite3`) | — |
 | `app-ui` | Streamlit UI: upload (multi-PDF), chat, follow-ups, model-parameter sidebar, session manager, retrieval debug panel, error surfacing | `app.py` + components | `orchestration`, `chat-store`, `chunking-index` |
 | `packaging` | Docker image, compose (app + volumes + healthcheck), env template, CI workflow | `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml` | all |
@@ -38,7 +38,7 @@ Build order: `doc-ingest` → `chunking-index` (+ `llm-gateway` in parallel, it 
 1. **Foundation (serial):** `doc-ingest`, `chunking-index` — retrieval quality gates depend on them.
 2. **Parallel with 1:** `llm-gateway`, `chat-store` — independent leaves; no shared code.
 3. **Core (serial):** `orchestration` — consumes the retrieval contract from (1) and the client
-   contract from (2). This is the highest-risk module; build after contracts are frozen.
+   contract from (2). Highest-risk module; build after contracts are frozen.
 4. **Serial:** `app-ui` — thin adapter over the graph; must not contain retrieval or prompt logic.
 5. **Serial last:** `packaging` — pins what already builds.
 6. **Cross-cutting:** observability and prompt assets land with their owning module (see

@@ -19,9 +19,9 @@ Three mechanisms, no external dependencies:
 
 ### 1. Structured logging
 
-`src/utils/logging.py` configures stdlib `logging` with a JSON formatter. Every record carries:
+`src/utils/tracing.py` is the observability entry point: it owns the node-trace JSON event stream that `app.py` initializes at startup (no separate logging module exists). Every record carries:
 `ts`, `level`, `trace_id` (per graph run, uuid4), `session_id`, `turn_seq`, `node`, `event`,
-`duration_ms`, plus node-specific fields. One `setup_logging(json: bool)` call at startup from
+`duration_ms`, plus node-specific fields, and is emitted by the `@trace_node` decorator (see §2). One `setup_trace()` call at startup from
 `app.py`.
 
 ### 2. Node tracing
@@ -58,7 +58,7 @@ produced, and *which* chunks grounded it. This is the demo artifact for observab
 | Refusal rate | `refusal_reason` histogram | distinguishes true out-of-scope from classification errors |
 | Path counts | `query_plan.kind` mix | proves decomposition is exercised |
 
-### Error taxonomy — `src/utils/errors.py`
+### Error taxonomy (in `src/utils/llm.py` — `src/utils/errors.py` was never created)
 
 | Error | Raised by | Log | User-facing behavior |
 |---|---|---|---|

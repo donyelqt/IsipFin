@@ -1,7 +1,7 @@
 # Architecture: IsipFin
 
-> Design contract. Node names, state fields, table names, and file paths below are **load-bearing**:
-> ADRs, `docs/PLAN.md`, `docs/prompts/`, and `docs/REPO-STRUCTURE.md` reference them verbatim.
+> Design contract. Node names, state fields, table names, file paths below are **load-bearing**:
+> ADRs, `docs/PLAN.md`, `docs/prompts/`, `docs/REPO-STRUCTURE.md` cite them verbatim.
 
 ## System Context
 
@@ -45,31 +45,30 @@ flowchart LR
     Parents --> Meta["chunks.jsonl parent text + provenance"]
 ```
 
-Invariants: pages are 1-based; every block carries `section_path`; parent linkage is by
-`parent_id`; ingestion is **idempotent by content hash** (`doc_id`) — re-uploading the same PDF
-rebuilds nothing.
+Invariants: pages 1-based; every block carries `section_path`; parents link by `parent_id`;
+ingestion **idempotent by content hash** (`doc_id`) — same PDF re-upload rebuilds nothing.
 
 ## Query Pipeline (runtime, per question)
 
 ```mermaid
 flowchart TD
-    Q["User question"] --> C{"Follow-up? / pronoun / that / it / ellipsis"}
-    C -- yes --> CTX["contextualize_question rewrite standalone"]
+    Q["User question"] --> C{"Follow-up? pronoun/that/it/ellipsis"}
+    C -- yes --> CTX["contextualize_question: rewrite standalone"]
     C -- no --> ANA
-    CTX --> ANA["analyze_question classify + plan, JSON schema"]
+    CTX --> ANA["analyze_question: classify + plan, JSON schema"]
     ANA --> R{"route"}
     R -- simple --> RET["hybrid_retrieve"]
     R -- multi-part --> DEC["decompose_question"]
-    R -- out-of-scope / no-docs --> REF["refuse name coverage gap"]
+    R -- out-of-scope/no-docs --> REF["refuse: name coverage gap"]
     DEC --> RET
-    RET --> RRF["RRF fuse dense+sparse expand child to parent"]
+    RET --> RRF["RRF fuse dense+sparse, expand child→parent"]
     RRF --> GATE{"best fused score > tau?"}
     GATE -- no --> RETRY["rewrite query once then GR2"]
-    GATE -- yes --> SYN["synthesize_answer citation-constrained"]
+    GATE -- yes --> SYN["synthesize_answer: citation-constrained"]
     RETRY --> SYN
-    SYN --> NUM["numeric pre-pass deterministic, no LLM"]
-    NUM --> VER{"groundedness check LLM + checks.py"}
-    VER -- fail --> RETRIM["drop unsupported claims mark ungrounded"]
+    SYN --> NUM["numeric pre-pass: deterministic, no LLM"]
+    NUM --> VER{"groundedness check: LLM + checks.py"}
+    VER -- fail --> RETRIM["drop unsupported claims, mark ungrounded"]
     VER -- pass --> OUT["AnswerEnvelope"]
     RETRIM --> OUT
     REF --> OUT
@@ -79,33 +78,30 @@ flowchart TD
 
 | Node | Reads (state) | Writes (state) | LLM? | Notes |
 |---|---|---|---|---|
-| `contextualize_question` | `question`, `history` | `standalone_question` | yes, cheap model | runs only when follow-up heuristic fires; on LLM error falls back to raw question |
-| `analyze_question` | `standalone_question`, `doc_catalog` | `query_plan`, `planner_degraded` | conditional — the symbolic year-coverage gate runs first, then yes, JSON schema | emits `kind ∈ {simple, multi_part, out_of_scope}`, `sub_queries[]`, `required_sections[]`; a `planner_degraded`-marked `out_of_scope` is a failed planner call, not a reasoned scope decision |
+| `contextualize_question` | `question`, `history` | `standalone_question` | yes, cheap | runs only when follow-up heuristic fires; on LLM error falls back to raw question |
+| `analyze_question` | `standalone_question`, `doc_catalog` | `query_plan`, `planner_degraded` | conditional — symbolic year-coverage gate first, then yes, JSON schema | emits `kind ∈ {simple, multi_part, out_of_scope}`, `sub_queries[]`, `required_sections[]`; a `planner_degraded`-marked `out_of_scope` is a failed planner call, not a reasoned scope decision |
 | `decompose_question` | `query_plan` | `sub_queries[]` | no (rule-based split of plan) | caps fan-out at 4 sub-queries |
 | `hybrid_retrieve` | `sub_queries` (or single question) | `retrieved: list[ScoredChunk]` | no | `retrieve()` per sub-query, RRF merge, top-k parents |
-| `synthesize_answer` | `retrieved`, `standalone_question`, `history` | `answer_md`, `citations` | yes | citation-constrained prompt (`docs/prompts/answer-synthesis-with-citations.md`) |
-| `groundedness_check` | `answer_md`, `citations` | `grounded`, `refusal_reason` | yes (after deterministic pre-pass) | **Deterministic numeric pre-pass first** (`src/chains/checks.py`): claims whose figure isn't in the cited span, or whose period label contradicts the claim, are rejected and trimmed *without* a model call; the LLM verifier then judges the remaining semantic claims, sent only the context blocks those claims cite (all of them when none cites anything) and reading each verdict back by the `claim_id` the prompt asks for — matching by list position instead re-points a verdict by however many claims the model skipped; schema violation → pessimistic default |
+| `synthesize_answer` | `retrieved`, `standalone_question`, `history` | `answer_md`, `citations` | yes | citation-constrained (`docs/prompts/answer-synthesis-with-citations.md`) |
+| `groundedness_check` | `answer_md`, `citations` | `grounded`, `refusal_reason` | yes (after deterministic pre-pass) | **Deterministic numeric pre-pass first** (`src/chains/checks.py`): claims whose figure isn't in the cited span, or whose period label contradicts the claim, are rejected and trimmed *without* a model call; the LLM verifier then judges remaining semantic claims, sent only the context blocks those claims cite (all blocks when none cites anything) and reading each verdict back by the `claim_id` the prompt asks for — matching by list position instead re-points a verdict by however many claims the model skipped; schema violation → pessimistic default |
 | `refuse` | `query_plan`, `doc_catalog` | `answer_md`, `refusal_reason` | no | honest refusal naming what the docs cover |
 
 Four of seven nodes call the LLM (`contextualize_question`, `analyze_question`,
-`synthesize_answer`, `groundedness_check` — the last only after its deterministic pre-pass).
+`synthesize_answer`, `groundedness_check` — last only after its deterministic pre-pass).
 Everything else — topology, edges, retry counting, fan-out cap, score gate, RRF merge, citation
-mapping, numeric verification — is symbolic. The full split, why "multi-agent" is the wrong label,
-and the deterministic checker's limits are in `docs/adr/ADR-010-neuro-symbolic-pipeline.md`.
-Deterministic predicates live in `src/chains/checks.py` (pure, unit-tested, no network).
+mapping, numeric verification — is symbolic (`src/chains/checks.py`, pure + unit-tested). Full
+split, why "multi-agent" is wrong, and the checker's limits: `docs/adr/ADR-010`.
 
-Routing rules: `out_of_scope` (question about content no uploaded doc covers, per `doc_catalog`
-section listing) skips retrieval entirely — no LLM call. A question naming exactly one fiscal
-year the catalog cannot cover is settled earlier still, by `checks.year_coverage_gap` inside
-`analyze_question` before any POST: it routes to `refuse` with `missing_aspect=time_period` and
-costs no planner call at all — golden case q09 ("What was revenue in FY2019?") refuses in 6.7 ms
-with zero LLM calls, where the pre-gate path took 9,812.7 ms and classified on a coin flip. The
-gate never overrides the planner otherwise: a comparison (several periods asked), an entity- or
-topic-gap question, and a period-less question stay the planner's judgement. Simple queries skip
-decomposition.
-Multi-part queries retrieve once per sub-query (max 4, sequential with the shared gateway
-budget). Score gate `tau` (default 0.02 RRF) triggers exactly **one** query rewrite retry, never
-an unbounded loop — bounded cost, no infinite retry.
+Routing: `out_of_scope` (question on content no uploaded doc covers, per `doc_catalog`) skips
+retrieval — no LLM call. A question naming exactly one fiscal year the catalog cannot cover is
+settled by `checks.year_coverage_gap` inside `analyze_question` *before* any POST: routes to
+`refuse` with `missing_aspect=time_period`, zero planner calls — golden case q09
+("What was revenue in FY2019?") refuses in 6.7 ms with zero LLM calls. The pre-gate never
+overrides the planner otherwise: a comparison (several periods), an entity/topic-gap question,
+and a period-less question stay the planner's judgement. Simple queries skip decomposition.
+Multi-part queries retrieve once per sub-query (max 4, sequential on the shared gateway budget).
+Score gate `tau` (default 0.02 RRF) triggers exactly **one** rewrite retry — bounded cost, no
+infinite retry.
 
 ## State Schema (`GraphState`)
 
@@ -113,12 +109,12 @@ an unbounded loop — bounded cost, no infinite retry.
 class GraphState(TypedDict, total=False):
     # inputs
     question: str
-    history: list[Turn]                 # from chat-store
+    history: list[Turn]                  # from chat-store
     params: LLMParams
-    doc_catalog: list[DocSummary]       # doc_id, filename, section paths — built at ingest
+    doc_catalog: list[DocSummary]        # doc_id, filename, section paths — built at ingest
     # intermediate
     standalone_question: str
-    query_plan: QueryPlan               # kind, sub_queries, required_sections
+    query_plan: QueryPlan              # kind, sub_queries, required_sections
     retrieved: list[ScoredChunk]
     retries: int
     # outputs
@@ -127,11 +123,11 @@ class GraphState(TypedDict, total=False):
     grounded: bool
     refusal_reason: str | None
     # observability (never read by nodes except accretion)
-    node_trace: list[NodeEvent]         # node, started_at, ms, tokens_in/out, error
+    node_trace: list[NodeEvent]        # node, started_at, ms, tokens_in/out, error
 ```
 
-Every node wraps its body in the tracing decorator (see `docs/OBSERVABILITY.md`); failures set
-`node_trace[-1].error` and raise a typed domain error that `app.py` renders as a user-visible
+Every node wraps its body in the tracing decorator (`docs/OBSERVABILITY.md`); failures set
+`node_trace[-1].error` and raise a typed domain error `app.py` renders as a user-visible
 banner — never an empty answer.
 
 ## Data Model
@@ -141,9 +137,9 @@ banner — never an empty answer.
 | Path | Content |
 |---|---|
 | `data/pdfs/<doc_id>.pdf` | uploaded corpus copy |
-| `data/index/faiss/` | one FAISS vector index for child chunks: `index.faiss` (the vectors) plus `meta.json` (dimension + vector count, so a stale artifact is detected instead of trusted) |
+| `data/index/faiss/` | FAISS vectors for child chunks: `index.faiss` + `meta.json` (dim + count, so stale artifacts are detected) |
 | `data/index/bm25.pkl` | pickled BM25Okapi over child token lists |
-| `data/index/chunks.jsonl` | one record per chunk: ids, texts, page, section_path, parent link, scores-free |
+| `data/index/chunks.jsonl` | one record per chunk: ids, texts, page, section_path, parent link, no scores |
 | `data/index/docs.jsonl` | `DocSummary` catalog (doc_id, filename, sha256, page_count, sections) |
 | `data/chat.sqlite3` | conversation store |
 
@@ -161,14 +157,14 @@ documents(doc_id TEXT PK, filename TEXT, sha256 TEXT, page_count INTEGER, indexe
 events(id INTEGER PK, session_id TEXT, turn_id INTEGER, ts TEXT, event TEXT, payload_json TEXT)
 ```
 
-`events` is the observability sink (mirrors what the debug panel reads back for the last answer).
-`node_trace_json` keeps the full per-node trace attached to the message that produced it.
+`events` = observability sink (mirrors the debug panel's last-answer read-back).
+`node_trace_json` = full per-node trace on the message that produced it.
 
 ## File Ownership (module → path)
 
 | module id | Paths |
 |---|---|
-| `doc-ingest` | `src/core/pdf_parser.py`, `src/core/tables.py` |
+| `doc-ingest` | `src/core/pdf_parser.py` |
 | `chunking-index` | `src/core/chunking.py`, `src/core/index.py`, `src/core/retrieval.py` |
 | `llm-gateway` | `src/utils/llm.py` (also holds the typed error taxonomy — `src/utils/errors.py` was never created), `src/utils/settings.py` |
 | `orchestration` | `src/chains/nodes/*.py`, `src/chains/graph.py`, `src/chains/state.py` |
@@ -178,16 +174,14 @@ events(id INTEGER PK, session_id TEXT, turn_id INTEGER, ts TEXT, event TEXT, pay
 
 ## Key Trade-offs (full reasoning in the ADRs)
 
-1. **LangGraph over plain LangChain chains / over bare OpenAI SDK** — explicit state, testable
-   nodes, inspectable routing. Cost: one more concept for reviewers. See ADR-001.
+1. **LangGraph over plain LangChain chains / bare OpenAI SDK** — explicit state, testable nodes,
+   inspectable routing. Cost: one more concept for reviewers. ADR-001.
 2. **Hybrid dense+sparse + parent-child over pure vector** — exact line-item keywords ("Note 13",
-   "operating income") need BM25; semantic drift on tables needs parent context. See ADR-002.
-3. **Vectorless (tree/PageIndex) rejected** — measured latency + token cost + it violates the
-   brief's explicit vector-database requirement. See ADR-003.
-4. **SQLite over Postgres/Chroma server** — one-process demo, zero-config Docker, portable. See
-   ADR-006/008.
+   "operating income") need BM25; semantic drift on tables needs parent context. ADR-002.
+3. **Vectorless (tree/PageIndex) rejected** — measured latency + token cost; violates the brief's
+   explicit vector-database requirement. ADR-003.
+4. **SQLite over Postgres/Chroma** — one-process demo, zero-config Docker, portable. ADR-006/008.
 5. **Self-contained Streamlit UI over a FastAPI/React split** — the brief names Streamlit as the
    deliverable; one language surface, and the graph stays importable so an API can be added later
-   without touching the pipeline. The honest reason is delivery speed and surface reduction, not
-   "Streamlit improves code quality" — the quality comes from the no-logic-in-UI boundary rule.
-   See ADR-009.
+   without touching the pipeline. Honest reason is delivery speed, not "Streamlit improves quality."
+   ADR-009.

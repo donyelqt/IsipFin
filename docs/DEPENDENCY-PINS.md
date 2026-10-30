@@ -60,9 +60,7 @@ Not implemented
 ```
 
 Implementation notes:
-
-- diff mode: `git diff` against the branch point, scan only added lines — under a second for a
-  46-hour build's diffs.
+- diff mode: `git diff` against the branch point, scan only added lines — under a second.
 - repo-wide mode in CI: full scan of the four paths.
 - Exclusion: `prompts/*.md` (markdown, may contain deliberate "TODO during build" markers per
   `docs/prompts/README.md`); `docs/**` is documentation, never scanned.
@@ -72,11 +70,11 @@ Implementation notes:
 
 1. Read the PyPI page of each direct dependency; record version + date in this table.
 2. `pip install -r requirements.txt` into a clean venv; if a transitive conflict appears, cap it
-   with an explicit pin in `requirements.txt` and a one-line comment naming why.
+   with an explicit pin and a one-line comment naming why.
 3. Record the resolved set (`pip freeze`) inside `requirements.txt` header comments — not as a
    second source of truth, as provenance.
 4. At every later task end, the only version change allowed is a deliberate bump recorded here
    with the reason. An accidental dependency change is a finding, not a detail.
 
-Rationale: a reviewer clones months from now; unpinned installs are how "works on my machine"
-becomes "doesn't run at all." This is one of the exam's stated values ("Reproducibility").
+Rationale: months from now a reviewer clones and installs; unpinned installs are how "works on my
+machine" becomes "doesn't run at all". This is one of the exam's stated values ("Reproducibility").

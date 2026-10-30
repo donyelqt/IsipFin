@@ -6,12 +6,11 @@
 
 ## Reading order
 
-**Reviewers (10 minutes):** `docs/JOURNAL.md` → `docs/GRADING-ALIGNMENT.md` →
-`docs/STRESS-TEST-RAG.md`. That is the decision record, the requirement mapping, and the
-adversarial review of the design.
+**Reviewers (10 minutes):** `JOURNAL.md` → `GRADING-ALIGNMENT.md` → `STRESS-TEST-RAG.md`.
+The decision record, the requirement mapping, and the adversarial review.
 
-**Engineers implementing it:** `docs/SPEC.md` → `docs/ARCHITECTURE.md` → `docs/PLAN.md` →
-`docs/TODO.md`, consulting the ADRs per module as you reach it.
+**Engineers:** `SPEC.md` → `ARCHITECTURE.md` → `PLAN.md` → `TODO.md`, consulting the ADRs per
+module as you reach it.
 
 ## Contents
 
@@ -19,9 +18,9 @@ adversarial review of the design.
 
 | Doc | What it is |
 |---|---|
-| `docs/CAPABILITY-MAP.md` | 7 module ids, dependency direction, build order, frozen interfaces |
-| `docs/SPEC.md` | Six-area spec: objective, stack, commands, structure, tests, boundaries, MoSCoW scope, interface dataclasses, success criteria |
-| `docs/ARCHITECTURE.md` | System context, ingestion + query pipelines (mermaid), node contract table, `GraphState`, data model, file ownership |
+| `CAPABILITY-MAP.md` | 7 module ids, dependency direction, build order, frozen interfaces |
+| `SPEC.md` | Six-area spec: objective, stack, commands, structure, tests, boundaries, MoSCoW scope, interface dataclasses, success criteria |
+| `ARCHITECTURE.md` | System context, ingestion + query pipelines (mermaid), node contract table, `GraphState`, data model, file ownership |
 
 ### Decisions (ADRs — `docs/adr/`)
 
@@ -36,33 +35,33 @@ adversarial review of the design.
 | [ADR-007](adr/ADR-007-observability-errors.md) | JSON events, node tracing, debug panel, typed error taxonomy |
 | [ADR-008](adr/ADR-008-packaging-docker-ci.md) | One Docker image, compose data volume, CI pipeline |
 | [ADR-009](adr/ADR-009-streamlit-native-ui.md) | Streamlit as the native UI; no React, no FastAPI layer — and why "the framework improves quality" is the wrong reason for it |
-| [ADR-010](adr/ADR-010-neuro-symbolic-pipeline.md) | The graph is a deterministic neuro-symbolic pipeline and an agentic workflow, not a multi-agent fleet; symbolic owns control, neural owns semantics, plus a deterministic numeric-check pre-pass before LLM verification, plus the settled vocabulary decision (accepted labels: "agentic workflow", "deterministic neuro-symbolic pipeline") |
+| [ADR-010](adr/ADR-010-neuro-symbolic-pipeline.md) | The graph is a deterministic neuro-symbolic pipeline and an agentic workflow (not a multi-agent fleet); symbolic owns control, neural owns semantics, with a deterministic numeric-check pre-pass before LLM verification. Accepted labels: "agentic workflow", "deterministic neuro-symbolic pipeline" |
 
 ### Stress tests (adversarial reviews)
 
 | Doc | What it is |
 |---|---|
-| `docs/STRESS-TEST-RAG.md` | 8 ranked failure modes of financial QA, each with a real trigger question and a mitigation in design vocabulary |
-| `docs/STRESS-TEST-DELIVERY.md` | Delivery risk register with Plan Bs, the 6-step demo script, kill-switch order |
-| `docs/GRADING-ALIGNMENT.md` | Every brief bullet → design element → demo evidence; over/under-built checks; journal hooks |
-| `docs/PLAN-REVIEW.md` | Redo audit of the full doc set: verdicts per file, the one real defect found (missing decomposition task), conflicts, gaps, and the assumptions ledger |
+| `STRESS-TEST-RAG.md` | 8 ranked failure modes of financial QA, each with a real trigger question and a mitigation in design vocabulary |
+| `STRESS-TEST-DELIVERY.md` | Delivery risk register with Plan Bs, the 6-step demo script, kill-switch order |
+| `GRADING-ALIGNMENT.md` | Every brief bullet → design element → demo evidence; over/under-built checks; journal hooks |
+| `PLAN-REVIEW.md` | Redo audit of the full doc set: verdicts per file, the one real defect found (missing decomposition task), conflicts, gaps, and the assumptions ledger |
 
 ### Quality bar (read before writing code)
 
 | Doc | What it is |
 |---|---|
-| `docs/DEFINITION-OF-DONE.md` | The standing gate every task must clear *in addition to* its acceptance criteria; exam-specific gates; "not done despite looking done" red flags |
-| `docs/CONSTRAINTS.md` | The numbered quality bar: floor rules, enforced-with-commands table, measured ratchets, floor-guard mechanism, the two exam adaptations stated openly |
-| `docs/DEPENDENCY-PINS.md` | PyPI-verified pins (2026-10-13), base-image decision, floor-guard wiring, version re-verification protocol |
-| `docs/LIFECYCLE-PLAYS.md` | Stage diagnosis, module portfolio view, and the prompt-iteration replacement risk register — play verdict: Extend |
+| `DEFINITION-OF-DONE.md` | The standing gate every task must clear *in addition to* its acceptance criteria; exam-specific gates; "not done despite looking done" red flags |
+| `CONSTRAINTS.md` | The numbered quality bar: floor rules, enforced-with-commands table, measured ratchets, floor-guard mechanism, the two exam adaptations stated openly |
+| `DEPENDENCY-PINS.md` | PyPI-verified pins (2026-10-13), base-image decision, floor-guard wiring, version re-verification protocol |
+| `LIFECYCLE-PLAYS.md` | Stage diagnosis, module portfolio view, and the prompt-iteration replacement risk register — play verdict: Extend |
 
 ### Execution
 
 | Doc | What it is |
 |---|---|
-| `docs/PLAN.md` | 26 tasks (T1–T26) in 6 phases, acceptance + verification per task, checkpoints, risks |
-| `docs/TODO.md` | The same tasks as a flat checklist (the task list target) |
-| `docs/TIMELINE.md` | 46-hour schedule with checkpoint gates and buffer policy |
+| `PLAN.md` | 26 tasks (T1–T26) in 6 phases, acceptance + verification per task, checkpoints, risks |
+| `TODO.md` | The same tasks as a flat checklist (the task list target) |
+| `TIMELINE.md` | 46-hour schedule with checkpoint gates and buffer policy |
 
 ### Prompts and behavior
 
@@ -79,22 +78,22 @@ adversarial review of the design.
 
 | Doc | What it is |
 |---|---|
-| `docs/LOCAL-INFERENCE.md` | Local inference record (`qwen2.5:3b` on Ollama: per-node verdicts, measurement traps) **and §7, the provider decision**: what the token constraint actually is, the four options (Groq free / Groq Developer / larger local / hybrid) quantified with cost, latency and which pass bars each can meet, and the recommendation with its exact `LLM_PROVIDER` / `LLM_MODEL` config |
+| `LOCAL-INFERENCE.md` | Local inference record (`qwen2.5:3b` on Ollama: per-node verdicts) and §7, the provider decision: the token constraint, the four options (Groq free / Groq Developer / local / hybrid) quantified with cost, latency and which pass bars each, and the recommendation with its exact `LLM_PROVIDER` / `LLM_MODEL` config |
 
 ### Operations and submission
 
 | Doc | What it is |
 |---|---|
-| `docs/OBSERVABILITY.md` | Event shape, node trace, debug panel contract, metrics, failure→UI mapping |
-| `docs/TESTING-AND-EVAL.md` | Hermetic test layers, golden QA set (10 cases incl. year-confusion canaries), pass bars |
-| `docs/SECURITY-PRIVACY.md` | Assets, controls, prompt-injection posture, out-of-scope honesty |
-| `docs/RUNBOOK.md` | Target-state commands, env vars, common failures and fixes |
-| `docs/REPO-STRUCTURE.md` | Target repo tree with module ownership and enforced structural rules |
-| `docs/JOURNAL.md` | The journal: decisions, hard problems, iteration templates, AI-use disclosure, measurements (§6 filled at build) |
-| `docs/DELIVERABLES-MATRIX.md` | Every exam requirement → artifact → verification, plus submission checklist |
+| `OBSERVABILITY.md` | Event shape, node trace, debug panel contract, metrics, failure→UI mapping |
+| `TESTING-AND-EVAL.md` | Hermetic test layers, golden QA set (10 cases incl. year-confusion canaries), pass bars |
+| `SECURITY-PRIVACY.md` | Assets, controls, prompt-injection posture, out-of-scope honesty |
+| `RUNBOOK.md` | Target-state commands, env vars, common failures and fixes |
+| `REPO-STRUCTURE.md` | Target repo tree with module ownership and enforced structural rules |
+| `JOURNAL.md` | The journal: decisions, hard problems, iteration templates, AI-use disclosure, measurements (§6 filled at build) |
+| `DELIVERABLES-MATRIX.md` | Every exam requirement → artifact → verification, plus submission checklist |
 
 ## Status
 
-Planning complete; implementation not started (by design — this is the plan phase).
+Planning complete; implementation not started (by design — plan phase).
 `docs/JOURNAL.md` sections marked `[FILL AFTER BUILD]` are intentionally empty slots to be
 filled with measured data during the build, not placeholder claims.

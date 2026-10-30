@@ -4,17 +4,17 @@ Last reviewed: 2026-10-13 by Doniele Antonio
 
 ## Floor (always enforced, no setup required)
 
-Applies to every file this plan produces, checked at task end and in CI:
+Every file this plan produces; checked at task end and in CI:
 
 - No new suppression comments: `# noqa`, `# type: ignore`, `# ruff: noqa`
-- No unimplemented stubs: `throw`-equivalents in Python (`raise NotImplementedError`), `except: pass`, empty `catch`-style swallows
+- No unimplemented stubs: `raise NotImplementedError`, `except: pass`, empty catch-style swallows
 - No skipped or deleted tests without a reason in the commit message
-- No secrets in source (`OPENAI_API_KEY` never appears in a file that is committed)
+- No secrets in source (`OPENAI_API_KEY` never in a committed file)
 - **This file does not get weakened to make a change pass.** Loosening it is a reviewed decision, never a fix.
 
 ## Enforced with numbers
 
-Every row names the command that produces the verdict. A dimension with a number and no command is an aspiration, not a constraint.
+Every row names the command producing the verdict. A number with no command is an aspiration, not a constraint.
 
 | Dimension | Rule | Checked by | Runs at |
 |---|---|---|---|
@@ -31,7 +31,7 @@ Every row names the command that produces the verdict. A dimension with a number
 
 ## Measured, not yet enforced
 
-Recorded during the build (T2, T6, T17 outputs); the ratchet rule is "must not fall without a journal note."
+Recorded during build (T2, T6, T17 outputs). Ratchet rule: must not fall without a journal note.
 
 | Metric | Today | Direction |
 |---|---|---|
@@ -44,29 +44,22 @@ Recorded during the build (T2, T6, T17 outputs); the ratchet rule is "must not f
 
 ## Floor guard mechanism
 
-`scripts/check_floor.py` (created at T1, wired into CI at T23 as the first step):
+`scripts/check_floor.py` (created at T1, wired into CI at T23 as first step):
 
 - **diff-scoped at task end**, repo-wide in CI.
 - Patterns (any hit exits nonzero): `# noqa`, `# type: ignore`, `raise NotImplementedError`, `TODO`, `FIXME`, `except:` immediately followed by `pass`, `Not implemented`.
-- Permitted exception: the token `TODO` inside prompt files under `prompts/` is a deliberate
-  "record during build" marker per `docs/prompts/README.md` — those files are markdown, not
-  source, and the guard scans `src/`, `tests/`, `scripts/`, `app.py` only.
+- Permitted exception: `TODO` inside prompt files under `prompts/` is a deliberate "record during build" marker per `docs/prompts/README.md` — markdown, not source. Guard scans `src/`, `tests/`, `scripts/`, `app.py` only.
 
 ## Adaptations to the exam (stated, not hidden)
 
 Two deviations from a production bar, each with its reason:
 
-1. **mypy is scoped to `src/utils` and `src/chains` signatures**, not the whole tree. Reason: the
-   46-hour clock; full strictness on Streamlit UI code would burn hours on `Any`-heavy framework
-   types for no grading credit. The contract-bearing code (gateway, graph state) is fully typed.
-2. **Accessibility dimension dropped.** `axe` and Lighthouse need a running URL; CI cannot serve
-   one for this project. Per the constraint skill's rule, the dimension is dropped and named
-   rather than given an invented check. The UI itself follows WCAG basics as good practice
-   (labels, contrast) but no automated gate is claimed.
+1. **mypy scoped to `src/utils` and `src/chains` signatures**, not the whole tree. Reason: 46-hour clock; full strictness on Streamlit UI code burns hours on `Any`-heavy framework types for no grading credit. Contract-bearing code (gateway, graph state) is fully typed.
+2. **Accessibility dimension dropped.** `axe` and Lighthouse need a running URL; CI cannot serve one. Per the constraint skill's rule, the dimension is dropped and named, not given an invented check. UI follows WCAG basics as good practice (labels, contrast); no automated gate claimed.
 
 ## Build-time checklist
 
-These are gates the build must pass, not claims it has passed:
+Gates the build must pass, not claims it has passed:
 
 - [ ] `ruff` and `black` clean on the union of changed files
 - [ ] `pytest -q` green with **zero network-dependent tests**
@@ -76,5 +69,4 @@ These are gates the build must pass, not claims it has passed:
 - [ ] `scripts/eval_rag.py` green including the $211,915M year-confusion canary
 - [ ] `docker build` succeeds
 
-This file is read before writing code; it is referenced by `docs/DEFINITION-OF-DONE.md` and by
-task T1 in `docs/PLAN.md` (which creates the lint/format configs these checks depend on).
+Read before writing code; referenced by `docs/DEFINITION-OF-DONE.md` and task T1 in `docs/PLAN.md` (which creates the lint/format configs these checks depend on).
