@@ -58,8 +58,9 @@ Red flags. Any one of these means the task is open:
 - T22 marked done without an actual cold clone (`git clone` → `docker compose up --build`)
 - A `[FILL AFTER BUILD]` marker still in `docs/JOURNAL.md` at submission time
 - "It runs on my machine" without the README path having been followed verbatim
-- The decomposition capability missing from any layer (node, task, tree, test) — the failure this
-  redo already caught once (`docs/PLAN-REVIEW.md` FAIL-1)
+- The decomposition capability missing from any layer (node, task, tree, test) — caught by a
+  plan-wide audit that found `decompose_question` as an architecture node with no task, file or
+  test (fixed as T10b across PLAN/TODO/TIMELINE/TESTING/DELIVERABLES/GRADING + `src/chains/nodes/decompose.py`)
 
 This list complements per-task acceptance criteria and never replaces them; every task in
 `docs/PLAN.md` and `docs/TODO.md` is checked against both bars.

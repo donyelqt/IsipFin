@@ -44,7 +44,6 @@ module as you reach it.
 | `STRESS-TEST-RAG.md` | 8 ranked failure modes of financial QA, each with a real trigger question and a mitigation in design vocabulary |
 | `STRESS-TEST-DELIVERY.md` | Delivery risk register with Plan Bs, the 6-step demo script, kill-switch order |
 | `GRADING-ALIGNMENT.md` | Every brief bullet → design element → demo evidence; over/under-built checks; journal hooks |
-| `PLAN-REVIEW.md` | Redo audit of the full doc set: verdicts per file, the one real defect found (missing decomposition task), conflicts, gaps, and the assumptions ledger |
 
 ### Quality bar (read before writing code)
 

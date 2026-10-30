@@ -59,7 +59,7 @@ TM's principles: **Own Your Thinking**, **Use AI Intentionally**, **Own the Outp
 
 After the initial 31-doc plan set was complete, the meta-skill governing this work was updated
 with three additional bindings. Rather than retrofitting silently, I re-audited the whole set
-(`docs/PLAN-REVIEW.md`) and found one real defect plus three missing artifacts:
+against the updated skill bindings and found one real defect plus three missing artifacts:
 
 1. **The defect — a missing task.** `decompose_question` existed in the architecture and ADR-001
    but had **no task, no file, no test row** — the exam's headline capability ("decomposing
@@ -73,7 +73,6 @@ with three additional bindings. Rather than retrofitting silently, I re-audited 
    session: streamlit 1.65.0, langgraph 1.2.14, faiss-cpu 1.15.1, pypdf 6.20.1, pdfplumber 0.11.10,
    openai 3.29.0, rank-bm25 0.2.2, pytest 9.1.1, ruff 0.17.0, black 26.10.1, python-dotenv 1.2.4).
 3. **Assumption ledger** — nine assumptions that were implicit are now written down
-   (`docs/PLAN-REVIEW.md`), per the updated skill's assumption-surfacing behavior.
 
 Honesty note for the interview: this redo was authored by me in the main session, not by
 subagents — the subagent pool returned 429 rate limits (retry-after ~6.5h) on all five dispatched

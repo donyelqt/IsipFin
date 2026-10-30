@@ -290,9 +290,9 @@ convention.
 
 - Control-outcome code (routing, caps, gates, budget, citation mapping, numeric checks)
   must stay deterministic and LLM-free. `src/chains/checks.py` is the symbolic layer and
-  has **zero** gateway calls — keep it that way.
 - Every new capability needs a fan-out across layers: node / task / test. Never ship one
-  layer alone (the failure `docs/PLAN-REVIEW.md` already caught once).
+  layer alone — the decomposition capability once shipped as an architecture node with no
+  task, file or test, and only surfaced via a plan-wide audit.
 - Nothing outside `data/` is written at runtime.
 
 **Streamlit UI**
