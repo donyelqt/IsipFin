@@ -261,10 +261,10 @@ convention.
   `GraphStateError` (`src/chains/graph.py`), `PromptError` family
   (`src/utils/prompts.py`), `ParseError`, `RetrievalError`, `StoreError` /
   `SessionNotFoundError`, `BuildError`, `DownloadError`.
-- There is **no `src/utils/errors.py`** and no `src/utils/settings.py`. The gateway
-  taxonomy lives in `src/utils/llm.py` and env reading happens in
-  `src/utils/llm.py` / `scripts/build_index.py` / `src/store/db.py`. Do not create either
-  file or import from one.
+- There is **no `src/utils/errors.py`** — the error classes above live in the modules
+  named next to them. Env reading is centralized in `src/utils/settings.py` (`load_env()`
+  is the one place the repo-root `.env` is read); do not create an `errors.py` or import
+  from one.
 - Never swallow a failure into an empty result. `except: pass` and bare `raise
   NotImplementedError` are floor-guard hits. A degraded path degrades **visibly** —
   e.g. a planner failure produces `planner_degraded=True` plus an honest out-of-scope
