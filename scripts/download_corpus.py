@@ -89,8 +89,6 @@ class DownloadError(Exception):
 
 @dataclass(frozen=True)
 class Fetched:
-    """A completed HTTP fetch: the local file, its size, digest, and declared type."""
-
     path: Path
     size_bytes: int
     sha256: str
@@ -99,8 +97,6 @@ class Fetched:
 
 @dataclass(frozen=True)
 class Source:
-    """One installed document, as recorded in the manifest."""
-
     filename: str
     url: str
     sha256: str
@@ -148,7 +144,6 @@ def escape_bytes(prefix: bytes) -> str:
 
 
 def sniff_kind(prefix: bytes) -> str:
-    """Best-effort identification of a response body from its leading bytes."""
     for signature, kind in _SIGNATURES:
         if prefix.startswith(signature):
             return kind
@@ -175,7 +170,6 @@ def sha256_of(path: Path) -> str:
 
 
 def read_prefix(path: Path, count: int = SNIFF_BYTES) -> bytes:
-    """The first ``count`` bytes of a file."""
     with open(path, "rb") as handle:
         return handle.read(count)
 
@@ -335,8 +329,7 @@ def install_source(url: str, directory: Path, filename: str, timeout: float, for
             )
             write_manifest(directory, sources)
             print(
-                "already present (digest recorded, not verified against the source): "
-                f"{destination}"
+                f"already present (digest recorded, not verified against the source): {destination}"
             )
             print(f"  {fmt_size(size)} ({size} bytes), sha256 {digest[:16]}… — no changes")
             return 0
