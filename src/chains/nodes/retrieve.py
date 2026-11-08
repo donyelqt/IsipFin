@@ -328,8 +328,6 @@ def _question(state: GraphState) -> str:
 
 
 def _unique(queries: Sequence[str]) -> list[str]:
-    """De-duplicate queries in first-seen order, dropping anything empty."""
-
     seen: set[str] = set()
     ordered: list[str] = []
     for query in queries:
