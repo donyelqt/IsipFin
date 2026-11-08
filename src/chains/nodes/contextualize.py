@@ -208,8 +208,6 @@ def _pages_of(value: Any) -> tuple[dict[str, Any], ...]:
 
 
 def _entities_of(value: Any) -> tuple[str, ...]:
-    """``Turn.entities`` coerced to strings; entries that are not strings are dropped."""
-
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(item for item in value if isinstance(item, str))
@@ -327,8 +325,6 @@ def _section_text(value: Any) -> str:
 
 
 def _render_entities(previous: Turn | None) -> str:
-    """The previous answer's grounded entities, comma-joined."""
-
     if previous is None or not previous.entities:
         return "(none recorded)"
     return ", ".join(previous.entities)
