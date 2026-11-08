@@ -282,7 +282,6 @@ def _answer_option_label(message: Message) -> str:
 
 
 def _render_chat_view(rail: Any, store: SessionStore | None) -> None:
-    """The conversation surface: stored transcript, the live answer, the composer."""
     session_id: str | None = rail.session_id
     doc_labels = rail.doc_labels
 
@@ -373,7 +372,6 @@ def _render_chat_view(rail: Any, store: SessionStore | None) -> None:
 
 
 def _render_view(rail: Any, store: SessionStore | None) -> None:
-    """Dispatch the canvas to the surface the rail's nav selected."""
     view = getattr(rail, "view", "chat")
 
     if view == "documents":
@@ -457,7 +455,6 @@ def _render_diagnostics_view(rail: Any, store: SessionStore | None) -> None:
 
 
 def main() -> None:
-    """Render the shell: environment, theme, rail, and the selected canvas view."""
     st.set_page_config(
         page_title="IsipFin",
         page_icon=":material/finance:",
