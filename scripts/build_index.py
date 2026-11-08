@@ -59,8 +59,6 @@ CATALOG_FIELDS = ("doc_id", "filename", "sha256", "page_count", "sections")
 # One line of ``docs.jsonl``: the five frozen fields above. ``size_bytes`` is optional
 # and read-only — it is never written, and its absence falls back to the file's size.
 class CatalogEntry(TypedDict):
-    """One document-catalog line: the frozen fields, plus the optional size hint."""
-
     doc_id: str
     filename: str
     sha256: str
@@ -155,12 +153,10 @@ class OpenAIEmbedder:
 
     @property
     def model(self) -> str:
-        """Embedding model id this client requests."""
         return self._model
 
     @property
     def endpoint(self) -> str:
-        """Base URL the client was built against."""
         return self._endpoint
 
     def __call__(self, texts: Sequence[str]) -> list[list[float]]:
@@ -285,7 +281,6 @@ def catalog_path(index_dir: Path = INDEX_DIR) -> Path:
 
 
 def read_catalog(path: Path | None = None) -> dict[str, CatalogEntry]:
-    """The catalog as ``{doc_id: entry}``; ``{}`` when nothing has been indexed yet."""
     target = path or catalog_path()
     if not target.is_file():
         return {}
@@ -398,8 +393,6 @@ def validate_pdf(path: Path) -> None:
 
 @dataclass(frozen=True)
 class DocReport:
-    """What happened to one PDF: the summary line and the catalog entry it produced."""
-
     doc_id: str  # full digest
     filename: str
     page_count: int
@@ -538,7 +531,6 @@ def _entry_for(report: DocReport, doc: ParsedDocument) -> CatalogEntry:
 
 
 def _format_table(reports: Sequence[DocReport]) -> str:
-    """The per-document summary table, aligned on the id/filename columns."""
     header = ("doc_id", "filename", "pages", "parents", "children", "action")
     rows = [
         (
@@ -624,8 +616,6 @@ def build(
         print()
         print(_format_table(reports))
         for report in reports:
-            # A skipped document keeps the sections already in the catalog verbatim;
-            # a freshly built one writes the sections of the bytes that were indexed.
             if report.doc_id not in entries:
                 entries[report.doc_id] = _entry_for(report, documents[report.doc_id])
         # Same path the catalog was read from: --index-dir must own the catalog too, or
