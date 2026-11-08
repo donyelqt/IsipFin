@@ -177,7 +177,6 @@ class LocalEmbedder:
             return self._model
 
     def _load_model(self) -> Any:
-        """Import fastembed and build the model, mapping every failure to one type."""
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
