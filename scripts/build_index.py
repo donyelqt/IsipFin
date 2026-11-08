@@ -81,7 +81,7 @@ MOCK_DIMENSIONS = 64
 
 
 class BuildError(Exception):
-    """Raised for a corpus that cannot be indexed; the CLI renders it as a message."""
+    """The CLI renders it as a message rather than a traceback."""
 
 
 # --- embedders ------------------------------------------------------------------
@@ -105,16 +105,13 @@ class MockEmbedder:
 
     @property
     def dimensions(self) -> int:
-        """Vector width this embedder produces."""
         return self._dimensions
 
     def __call__(self, texts: Sequence[str]) -> list[list[float]]:
-        """Map every text to one deterministic unit vector of ``dimensions`` floats."""
         return [_mock_vector(text, self._dimensions) for text in texts]
 
 
 def _mock_vector(text: str, dimensions: int) -> list[float]:
-    """One unit vector derived from ``text``: sha256 of the text, folded to ``dimensions``."""
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     vector = [float(digest[offset] - 127.5) for offset in range(dimensions) if offset < len(digest)]
     if len(vector) < dimensions:  # digest shorter than the requested width
@@ -329,7 +326,6 @@ def write_catalog(entries: Iterable[CatalogEntry], path: Path | None = None) -> 
 
 
 def sha256_of(path: Path) -> str:
-    """Digest of a file's bytes, read in chunks so large documents stay cheap."""
     hasher = hashlib.sha256()
     with open(path, "rb") as handle:
         while True:
@@ -559,7 +555,6 @@ def _format_table(reports: Sequence[DocReport]) -> str:
 
 
 def _index_size(index_dir: Path) -> str:
-    """Total on-disk size of the index artifacts (the catalog itself excluded)."""
     total = 0
     for child in sorted(index_dir.rglob("*")):
         if child.is_file() and child.name != CATALOG_FILENAME:
@@ -581,7 +576,6 @@ def build(
     embedder_name: str,
     embedder: Embedder,
 ) -> int:
-    """Index every requested PDF and summarize; returns the process exit code."""
     if not pdf_paths:
         print(f"no PDFs to index: {pdf_dir} contains no .pdf files")
         print(f"  put the corpus PDF in {pdf_dir} (or pass --pdf PATH), then run this again")
