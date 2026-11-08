@@ -233,7 +233,6 @@ def _filter_positions(index: ChunkIndex, filters: dict[str, Any] | None) -> list
 
 
 def _resolve_k(k: int) -> int:
-    """Validate the requested fused top-k (must be a positive integer)."""
     if not isinstance(k, int) or isinstance(k, bool):
         raise ValueError(f"k must be an integer, got {type(k).__name__}")
     if k < 1:
@@ -386,7 +385,7 @@ _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 class _Unset:
-    """Type of the :data:`_UNSET` sentinel: "no embedder argument was passed"."""
+    pass
 
 
 #: Distinguishes an omitted ``embedder`` argument (the runtime policy applies) from an
