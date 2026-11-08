@@ -415,8 +415,6 @@ class CaseError(Exception):
 
 @dataclass(frozen=True)
 class Case:
-    """One golden case, parsed from one non-blank ``.jsonl`` line."""
-
     case_id: str
     question: str
     expect: dict[str, Any]
@@ -443,8 +441,6 @@ class Case:
 
 @dataclass(frozen=True)
 class DatasetReport:
-    """What the loader found: the usable cases, plus every line it had to reject."""
-
     cases: list[Case]
     malformed: list[tuple[int, str]]
     duplicate_ids: list[str]
@@ -648,8 +644,6 @@ class CaseResult:
 
     @property
     def failed(self) -> bool:
-        """Whether this case failed a check measurable in the current mode."""
-
         return any(
             (
                 self.retrieval_hit is False,
@@ -1647,8 +1641,6 @@ def _score_case(case: Case, result: CaseResult, scopes: Mapping[str, _Scope]) ->
 
 @dataclass
 class _RunContext:
-    """One shared session: the loaded document catalog, the mode, and its metric scope."""
-
     docs: list[Any]
     mock_mode: bool
     index_dir: Path
@@ -1851,8 +1843,6 @@ def _trace_tokens(events: Sequence[Any]) -> tuple[int, int]:
 
 
 def _print_case(result: CaseResult, position: int, total: int, mock_mode: bool = False) -> None:
-    """One case's block: what it ran on and everything the five metrics saw."""
-
     case = result.case
     print("=" * 78)
     print(f"[{position}/{total}] {case.case_id} (line {case.line_no})  {case.question!r}")
@@ -1958,8 +1948,6 @@ _FIELD: dict[str, str] = {
 
 
 def _wrong_year_fires(results: Sequence[CaseResult]) -> int:
-    """How many canary cases the run contaminated."""
-
     return sum(1 for r in results if r.wrong_year)
 
 
@@ -2120,8 +2108,6 @@ def _print_summary(
     report: DatasetReport,
     requested: Sequence[Case],
 ) -> int:
-    """The aggregate block: every metric's value against its bar, then the exit code."""
-
     print("#" * 78)
     print("AGGREGATE — docs/TESTING-AND-EVAL.md §Layer 2 pass bars")
     print("#" * 78)
@@ -2188,8 +2174,6 @@ def _print_summary(
 
 
 def _print_exit(code: int) -> None:
-    """The exit code and its meaning, printed on every run."""
-
     meanings = {
         EXIT_PASS: "every meaningful metric met its bar",
         EXIT_REGRESSION: "a golden regression — a pass bar was missed, the wrong-year canary "
