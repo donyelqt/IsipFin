@@ -208,7 +208,6 @@ def as_int(value: Any, field: str) -> int | None:
 
 
 def as_flag(value: Any, field: str) -> bool | None:
-    """``NULL``/``0``/``1`` in the ``grounded`` column to ``None``/``False``/``True``."""
     if value is None:
         return None
     return bool(as_int(value, field))
@@ -230,7 +229,6 @@ class Event:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Event:
-        """Rebuild an event from a ``SELECT`` row, decoding ``payload_json``."""
         return cls(
             id=as_int(row["id"], "events.id"),
             session_id=row["session_id"],
@@ -243,8 +241,6 @@ class Event:
 
 @dataclass(frozen=True)
 class Document:
-    """One row of the ``documents`` registry — an ingested PDF."""
-
     doc_id: str
     filename: str
     sha256: str
@@ -331,7 +327,6 @@ class ChatStore:
 
     @property
     def path(self) -> Path:
-        """The database file this store owns."""
         return self._path
 
     @property
