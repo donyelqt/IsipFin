@@ -223,7 +223,6 @@ def _as_store_failure(exc: Exception) -> StoreError:
 
 
 def _footer_text(rail_ready: bool, docs: int) -> str:
-    """One honest status line: what the pipeline is, and whether it is offline."""
     parts = ["Hybrid RAG · FAISS + BM25 + RRF", "deterministic numeric pre-pass"]
     parts.append(
         f"{docs} document{'' if docs == 1 else 's'} indexed"
@@ -271,8 +270,6 @@ def _stored_answers(store: SessionStore | None, session_id: str | None) -> list[
 
 
 def _answer_option_label(message: Message) -> str:
-    """One picker row: a stored answer's question, whitespace-collapsed and shortened."""
-
     question = " ".join(str(message.question or "").split())
     if not question:
         return f"Answer {message.id}"
@@ -439,7 +436,6 @@ def _render_diagnostics_view(rail: Any, store: SessionStore | None) -> None:
         )
         return
 
-    # A lone answer needs no control: the picker appears only when there is a choice.
     choice: int | None = options[0]
     if len(options) > 1:
         choice = st.selectbox(
