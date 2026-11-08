@@ -110,8 +110,7 @@ class ErrorView:
 _AUTH_VIEW = ErrorView(
     title="Model access denied",
     message=(
-        "The model provider refused the request: the API key is missing, wrong, or no longer "
-        "valid."
+        "The model provider refused the request: the API key is missing, wrong, or no longer valid."
     ),
     hint=(
         "Set OPENAI_API_KEY to a valid key and restart the app, or set MOCK_LLM=1 to keep "
@@ -156,9 +155,7 @@ _SCHEMA_VIOLATION_VIEW = ErrorView(
         "The model's reply did not match the structure the answer step requires, so it could "
         "not be validated."
     ),
-    hint=(
-        "Retry the question — the gateway asks the model once more with a stricter " "instruction."
-    ),
+    hint=("Retry the question — the gateway asks the model once more with a stricter instruction."),
     retryable=True,
 )
 
@@ -312,8 +309,6 @@ def render_error(exc: BaseException, *, on_retry: bool = False) -> bool:
 
 
 def _parse_view(exc: ParseError) -> ErrorView:
-    """The parse-failure banner, naming the failing page when the exception carries one."""
-
     page = _page_number(exc)
     page_note = f" Page {page} could not be read." if page is not None else ""
     return ErrorView(
@@ -335,9 +330,7 @@ def _generic_view(exc: BaseException) -> ErrorView:
     return ErrorView(
         title="Unexpected error",
         message=message,
-        hint=(
-            "Retry the action; if it fails again, the app logs carry the details for this " "turn."
-        ),
+        hint=("Retry the action; if it fails again, the app logs carry the details for this turn."),
         retryable=True,
     )
 
@@ -403,8 +396,6 @@ def _is_local_embedder_error(exc: LocalEmbeddingError | BaseException) -> bool:
 
 
 def _page_number(exc: BaseException) -> int | None:
-    """The page a parse failure names, from an attribute or from its own message."""
-
     for name in _PAGE_ATTRS:
         value = getattr(exc, name, None)
         if isinstance(value, int) and not isinstance(value, bool):
