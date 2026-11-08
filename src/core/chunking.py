@@ -59,7 +59,6 @@ from src.core.pdf_parser import Block, ParsedDocument
 PARENT_TOKENS = 1000
 # Above this a table is no longer atomic and is split at row boundaries.
 TABLE_SPLIT_TOKENS = 1200
-# Child size / overlap, in estimated tokens.
 CHILD_TOKENS = 250
 CHILD_OVERLAP_TOKENS = 50
 
@@ -128,8 +127,6 @@ def _table_rows(table_text: str) -> list[str]:
 
 
 def _is_markdown_table(rows: list[str]) -> bool:
-    """True when ``rows`` look like a whole markdown table: header row,
-    alignment row, then data rows — all pipe-delimited."""
     if len(rows) < 3:
         return False
     if not rows[0].lstrip().startswith("|"):
@@ -232,7 +229,6 @@ def _parent_units(blocks: tuple[Block, ...]) -> list[Block]:
 
 
 def _text_of(units: list[Block]) -> str:
-    """Parent text: blocks in document order, separated by a paragraph break."""
     return _BLOCK_JOIN.join(unit.text for unit in units)
 
 
@@ -324,7 +320,6 @@ def _sentence_fragments(paragraph: str) -> list[str]:
 
 
 def _over_budget(current: list[Block], unit: Block) -> bool:
-    """True when adding ``unit`` to ``current`` would exceed the parent budget."""
     return estimate_tokens(_text_of([*current, unit])) > PARENT_TOKENS
 
 
@@ -362,7 +357,6 @@ def _group_units(units: list[Block]) -> list[list[Block]]:
 
 
 def _build_parents(doc: ParsedDocument) -> list[ParentChunk]:
-    """Group a document's blocks into heading-aligned parent chunks."""
     parents: list[ParentChunk] = []
     for group in _group_units(_parent_units(doc.blocks)):
         parents.append(_parent_from(group, doc_id=doc.doc_id, index=len(parents)))
