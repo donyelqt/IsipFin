@@ -331,8 +331,6 @@ def _sorted_chunks(records: Any) -> tuple[Any, ...]:
 
 
 def _rank_key(chunk: Any) -> tuple[int, int]:
-    """Sort key putting ranked chunks first, in ascending fused rank."""
-
     rank = _rank_of(chunk)
     return (1, 0) if rank is None else (0, rank)
 
@@ -528,8 +526,6 @@ def _flag(value: Any) -> bool | None:
 
 
 def _optional_text(value: Any) -> str | None:
-    """``value`` as a stripped string, or ``None`` when it is absent or empty."""
-
     if value is None:
         return None
     text = str(value).strip()
@@ -556,8 +552,6 @@ def _joined(value: Any) -> str:
 
 
 def _join_path(value: Any) -> str:
-    """A ``section_path`` as one breadcrumb line, or the dash when it is empty."""
-
     parts = _path_parts(value)
     return " > ".join(parts) if parts else _DASH
 
@@ -579,8 +573,6 @@ def _count_text(value: Any) -> str:
 
 
 def _rank_of(chunk: Any) -> int | None:
-    """A chunk's 0-based ``fused_rank``, or ``None`` when the record carries none."""
-
     rank = _int_or_none(_attr(chunk, "fused_rank"))
     return rank if rank is not None and rank >= 0 else None
 
@@ -589,8 +581,6 @@ def _rank_of(chunk: Any) -> int | None:
 
 
 def _format_ms(value: float | None) -> str:
-    """A duration in milliseconds with grouping, or the dash when it was not measured."""
-
     number = _number(value)
     return _DASH if number is None else f"{number:,.1f} ms"
 
@@ -608,8 +598,6 @@ def _format_tokens(row: _NodeRow) -> str:
 
 
 def _token_count(value: int | None) -> str:
-    """One side of a token figure, as a grouped number or the dash."""
-
     return _DASH if value is None else f"{value:,}"
 
 
@@ -636,8 +624,6 @@ def _truncate(text: str) -> str:
 
 
 def _doc_label(doc_id: str, doc_names: Mapping[str, str] | None) -> str:
-    """The document's display name when the caller supplied one, else a short id."""
-
     if doc_id == _DASH:
         return _DASH
     if doc_names is not None:
