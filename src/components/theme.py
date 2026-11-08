@@ -249,7 +249,6 @@ CSS_CLASSES = (
 
 
 def _token_block() -> str:
-    """The ``:root`` custom properties, one per line, from :data:`TOKENS`."""
     lines = [f"    {name}: {value};" for name, value in TOKENS.items()]
     return ":root {\n" + "\n".join(lines) + "\n}"
 
@@ -1134,9 +1133,7 @@ def inject_theme() -> None:
     request serializes behind the stylesheet, which is acceptable at two
     families and is why the fallback stacks exist.
     """
-    block = (
-        "<style>\n" f"{_FONT_IMPORT_CSS}\n" f"{_token_block()}\n" f"{_STYLESHEET_BODY}\n" "</style>"
-    )
+    block = f"<style>\n{_FONT_IMPORT_CSS}\n{_token_block()}\n{_STYLESHEET_BODY}\n</style>"
     st.markdown(block, unsafe_allow_html=True)
 
 
@@ -1160,7 +1157,6 @@ def _escape(text: object | None) -> str:
 
 
 def _class_list(*names: str | None) -> str:
-    """Join the non-empty class names into one ``class`` attribute value."""
     return " ".join(name for name in names if name)
 
 
@@ -1225,7 +1221,6 @@ def panel(
 
 
 def label(text: str) -> None:
-    """Render an uppercase monospace field label (``PREVIOUS CONVERSATIONS``)."""
     _emit(f'<div class="{_class_list("isip-label")}">{_escape(text)}</div>')
 
 
@@ -1286,7 +1281,6 @@ def badge(text: str, *, kind: str = "neutral", extra_classes: str | None = None)
 
 
 def caption_note(text: str) -> None:
-    """Render a dim caption-style note under a block (hints, fallback reasons)."""
     _emit(f'<div class="{_class_list("isip-note")}">{_escape(text)}</div>')
 
 
@@ -1393,7 +1387,6 @@ def rail_status_card(title: str, lines: Sequence[str], badge: str | None = None)
 
 
 def hero_mark() -> None:
-    """Render the centered hero mark: the brand tile at hero size, no wordmark."""
     _emit(
         f'<div class="{_class_list("isip-hero")}">'
         f'<span class="{_class_list("isip-mark", "isip-hero-mark")}" aria-hidden="true"></span>'
@@ -1426,12 +1419,10 @@ def hero_title(plain: str, accent: str | None = None) -> None:
 
 
 def hero_sub(text: str) -> None:
-    """Render the hero's muted subtext, centered and width-limited."""
     _emit(f'<div class="{_class_list("isip-hero-sub")}">{_escape(text)}</div>')
 
 
 def eyebrow(text: str) -> None:
-    """Render a small centered upper-case label (``TRY A DEMO``)."""
     _emit(f'<div class="{_class_list("isip-eyebrow")}">{_escape(text)}</div>')
 
 
