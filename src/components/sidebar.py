@@ -212,7 +212,6 @@ DEFAULT_MODELS: tuple[str, ...] = (
     "gpt-4.1-mini",
     "llama3.1",
     "qwen2.5",
-    # just a placeholder and can be modified
 )
 
 #: ``temperature`` bounds. Synthesis is user-adjustable
@@ -1277,8 +1276,6 @@ def _workspace_lines(status: IndexStatus, store: Any | None) -> list[str]:
 
 
 def _plural(count: int, noun: str) -> str:
-    """``1 document`` / ``3 documents`` — the counts on the card read as prose."""
-
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
