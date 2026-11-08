@@ -397,8 +397,6 @@ def _mock_scopes() -> dict[str, _Scope]:
 
 
 def _full_scopes() -> dict[str, _Scope]:
-    """Real-LLM scope: every metric is measurable for every case."""
-
     return {name: _Scope(name, True) for name in METRICS}
 
 
@@ -428,14 +426,10 @@ class Case:
 
     @property
     def wants_citation(self) -> bool:
-        """Whether this case expects the answer to carry at least one citation."""
-
         return bool(self.expect.get("require_citations", True))
 
     @property
     def expected_appearances(self) -> list[str]:
-        """The figures and names the answer must contain, in the doc's own wording."""
-
         return [str(f) for f in self.expect.get("must_appear", []) or [] if str(f).strip()]
 
 
@@ -490,8 +484,6 @@ _EXPECT_KINDS = ("figure", "entity_figure", "summary", "refusal")
 
 
 def _case_from(payload: Any, line_no: int) -> Case:
-    """One parsed line as a :class:`Case`, raising :class:`CaseError` on a contract break."""
-
     if not isinstance(payload, Mapping):
         raise CaseError(f"expected a JSON object, found {type(payload).__name__}")
     for key in _REQUIRED_STRINGS:
@@ -744,8 +736,6 @@ _TABLE_CELL_ALIGNMENT = re.compile(r"^[\s:-]*$")
 
 
 def _sentences(text: str) -> list[str]:
-    """The answer's sentences: markdown line breaks and sentence terminators both split."""
-
     chunks: list[str] = []
     for paragraph in text.replace("\r", "").split("\n"):
         paragraph = paragraph.strip()
@@ -763,8 +753,6 @@ def _sentences(text: str) -> list[str]:
 
 
 def _row_cells(line: str) -> list[str]:
-    """One markdown table row as its stripped cells (``| a | b |`` -> ``["a", "b"]``)."""
-
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
@@ -775,8 +763,6 @@ def _is_label_cell(cell: str) -> bool:
 
 
 def _is_alignment_row(cells: Sequence[str]) -> bool:
-    """True for the ``|---|---|`` row that separates a table's header from its body."""
-
     return all(cell and _TABLE_CELL_ALIGNMENT.fullmatch(cell) for cell in cells)
 
 
@@ -1014,8 +1000,6 @@ def _citation_entries(citations: Sequence[Any]) -> list[dict[str, Any]]:
 
 
 def _valid_citation(entry: Mapping[str, Any]) -> bool:
-    """One citation is valid when it carries a 1-based ref_index it points with."""
-
     ref = entry.get("ref_index")
     return isinstance(ref, int) and not isinstance(ref, bool) and ref >= 1
 
@@ -1070,8 +1054,6 @@ class _Projection:
     reason: str
 
     def __bool__(self) -> bool:
-        """A projection with no cost and no wait is nothing to report."""
-
         return self.tokens > 0 or self.wait_seconds > 0.0
 
 
@@ -1270,15 +1252,11 @@ class _TokenPacer:
 
     @staticmethod
     def _note(quiet: bool, stream: Any, projection: _Projection, label: str) -> None:
-        """One line of pacing arithmetic, on the run's own stream, never in quiet mode."""
-
         if quiet or not projection:
             return
         print(f"  pacing         : {projection.reason} {label}".rstrip(), file=stream)
 
     def record(self, tokens: int) -> None:
-        """Stamp a finished case's real cost into the rolling window."""
-
         if self.mock_mode or tokens <= 0:
             return
         self._spend.append((self._now(), int(tokens)))
@@ -1361,8 +1339,6 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_flag(name: str) -> bool:
-    """Whether an environment flag is set to ``1``, ``true`` or ``yes``."""
-
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 
 
@@ -1648,8 +1624,6 @@ class _RunContext:
 
 
 def _load_catalog(index_dir: Path) -> list[Any]:
-    """The document catalog as the app builds it, from the real on-disk index."""
-
     from src.chains.state import DocSummary
 
     path = index_dir / CATALOG_NAME
@@ -1677,8 +1651,6 @@ def _load_catalog(index_dir: Path) -> list[Any]:
 
 
 def _check_index(index_dir: Path) -> list[str]:
-    """The index artifacts the harness needs; a missing one is a harness error."""
-
     return [
         f"missing index artifact: {index_dir / name}"
         for name in ("chunks.jsonl", "bm25.pkl", CATALOG_NAME)
@@ -1966,8 +1938,6 @@ def _wrong_year_counts(results: Sequence[CaseResult]) -> tuple[int, int]:
 
 
 def _rate_text(values: Sequence[bool | None]) -> str:
-    """``n/m (0.xx)`` over the scored subset, or ``NA`` when nothing was scoreable."""
-
     scored = [value for value in values if value is not None]
     if not scored:
         return "NA"
@@ -2299,8 +2269,6 @@ def _network_report(mock_mode: bool) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the golden set, print the report, return the process exit code."""
-
     # `.env` is read before anything else, so MOCK_LLM and any key in it are part of the
     # environment the mode is decided from. Without this the documented `cp .env.example
     # .env` setup ran keyless and every case degraded.
