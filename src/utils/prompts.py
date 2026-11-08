@@ -166,12 +166,10 @@ def parse_version(version: str) -> tuple[int, int, int]:
 
 
 def _split_row(line: str) -> list[str]:
-    """Split one markdown table row into stripped cells (``| a | b |`` -> ``[a, b]``)."""
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def _is_separator(cells: list[str]) -> bool:
-    """True for the ``|---|---|`` row that separates a table header from its body."""
     return all(cell and set(cell) <= {"-", ":"} for cell in cells)
 
 
@@ -222,7 +220,6 @@ def parse_header(text: str) -> tuple[dict[str, str], int]:
 
 
 def _body_from(text: str, body_start: int) -> str:
-    """The file's lines from ``body_start`` on, with leading blank lines dropped."""
     body = "\n".join(text.splitlines()[body_start:])
     return body.lstrip("\n")
 
