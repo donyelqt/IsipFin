@@ -237,8 +237,6 @@ def _documents(state: GraphState) -> list[DocSummary]:
 
 
 def _repaired(doc: DocSummary) -> DocSummary:
-    """One catalog entry with ``sections`` resolved to its declared shape, paths of headings."""
-
     if all(isinstance(path, tuple) for path in doc.sections):
         return doc
     return replace(doc, sections=section_paths(doc.sections))
@@ -403,8 +401,6 @@ def _texts(value: Any, limit: int = MAX_SUB_QUERIES) -> list[str]:
 
 
 def _optional_text(value: Any) -> str | None:
-    """``value`` as a stripped string, or ``None`` when it is absent, empty, or not text."""
-
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -442,7 +438,7 @@ def _degraded_plan(reason: str, question: str) -> QueryPlan:
     """
 
     logger.warning(
-        "planner_degraded: %s; classifying out_of_scope with no missing_aspect " "(question=%r)",
+        "planner_degraded: %s; classifying out_of_scope with no missing_aspect (question=%r)",
         reason,
         question[:120],
     )
