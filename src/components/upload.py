@@ -191,17 +191,14 @@ class IngestResult:
 
     @property
     def indexed(self) -> tuple[FileResult, ...]:
-        """The uploads that were parsed, embedded and written."""
         return tuple(item for item in self.files if item.state == "indexed")
 
     @property
     def skipped(self) -> tuple[FileResult, ...]:
-        """The uploads already indexed under the same digest."""
         return tuple(item for item in self.files if item.state == "skipped")
 
     @property
     def failed(self) -> tuple[FileResult, ...]:
-        """The uploads that failed, each with its reason on the card."""
         return tuple(item for item in self.files if item.state == "failed")
 
     def summary(self) -> str:
@@ -280,7 +277,6 @@ def _resolve_embedder() -> tuple[Embedder, str]:
 
 
 def _catalog_path(index_dir: Path | None) -> Path:
-    """The catalog file inside ``index_dir`` (or this module's default index directory)."""
     target = Path(index_dir) if index_dir is not None else INDEX_DIR
     return target / CATALOG_FILENAME
 
@@ -362,7 +358,6 @@ def _artifact_bytes(target: Path) -> int:
 
 
 def _count_records(path: Path) -> int:
-    """Non-blank lines of ``chunks.jsonl``: one line is one child chunk."""
     with open(path, "rb") as handle:
         return sum(1 for line in handle if line.strip())
 
@@ -590,7 +585,6 @@ def _append_catalog_entry(index_dir: Path, digest: str, document: Any) -> None:
 
 
 def _failed(filename: str, detail: str) -> FileResult:
-    """A failed upload's card: the reason, and nothing written for it."""
     return FileResult(filename=filename, state="failed", detail=detail)
 
 
@@ -811,7 +805,6 @@ def render_file_result(result: FileResult) -> None:
 
 
 def _indexed_detail(result: FileResult) -> str:
-    """The counts line of a built card: pages, parents, children, sections."""
     parts: list[str] = []
     if result.page_count is not None:
         parts.append(f"{result.page_count} pages")
@@ -909,5 +902,4 @@ def _header_row(name: str, state: str, color: str) -> str:
 
 
 def _detail_line(text: str, color: str = "var(--text-muted)") -> str:
-    """A card's detail line in the given token colour (muted by default)."""
     return f'<div style="color:{color};font-size:0.8rem">{text}</div>'
