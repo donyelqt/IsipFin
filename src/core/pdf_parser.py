@@ -49,7 +49,6 @@ class ParsedDocument:
 
 # --- patterns (ADR-004) ---------------------------------------------------------
 
-# ALL-CAPS lines, "Note 13", and numbered sections head sections.
 _HEADING_ALLCAPS = re.compile(r"^[A-Z][A-Z0-9 ,&'\-/()\.]{4,}$")
 _HEADING_NOTE = re.compile(r"^Note\s+\d+\b")
 _HEADING_NUMBERED = re.compile(r"^(\d+\.|[A-Z]\.)\s+[A-Z]")
