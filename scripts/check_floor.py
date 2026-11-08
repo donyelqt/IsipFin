@@ -66,7 +66,6 @@ def repo_files() -> list[Path]:
 
 
 def diff_files() -> list[Path]:
-    """Files changed vs the merge base with the default branch, plus uncommitted."""
     try:
         base = git(["merge-base", "HEAD", "origin/main"]).strip()
     except subprocess.CalledProcessError:
