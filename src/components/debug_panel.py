@@ -424,8 +424,6 @@ def _render_grounding(view: _PanelView) -> None:
 
 
 def _node_row_html(row: _NodeRow) -> str:
-    """One node's row: name, duration, tokens, and a failure badge when it errored."""
-
     duration = _escape(_format_ms(row.duration_ms))
     cells = [
         f'<span class="isip-figure">{_escape(row.node)}</span>',
@@ -444,8 +442,6 @@ def _node_row_html(row: _NodeRow) -> str:
 
 
 def _chunk_card(chunk: Any, doc_names: Mapping[str, str] | None) -> str:
-    """One retrieved chunk: rank, document and page, the scores, section, and snippet."""
-
     rank = _rank_of(chunk)
     page = _int_or_none(_attr(chunk, "page"))
     doc_label = _doc_label(_as_text(_attr(chunk, "doc_id")), doc_names)
@@ -467,8 +463,6 @@ def _chunk_card(chunk: Any, doc_names: Mapping[str, str] | None) -> str:
 
 
 def _field_row(key: str, value: str) -> str:
-    """One ``LABEL  value`` row, for the plan and grounding fields."""
-
     return (
         f'<div style="{_PAIR_STYLE}">'
         f'<span class="isip-label" style="{_LABEL_STYLE}">{_escape(key)}</span>'
@@ -543,8 +537,6 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _as_text(value: Any) -> str:
-    """``value`` as display text, with the dash for anything absent or empty."""
-
     return _optional_text(value) or _DASH
 
 
@@ -581,8 +573,6 @@ def _path_parts(value: Any) -> list[str]:
 
 
 def _count_text(value: Any) -> str:
-    """The number of items in a citation list, or the dash when it is not a list."""
-
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return f"{len(value):,}"
     return _DASH
@@ -656,7 +646,7 @@ def _doc_label(doc_id: str, doc_names: Mapping[str, str] | None) -> str:
             return str(name)
     if len(doc_id) <= _SHORT_ID_CHARS:
         return doc_id
-    return f"{doc_id[:_SHORT_ID_CHARS - 1]}…"
+    return f"{doc_id[: _SHORT_ID_CHARS - 1]}…"
 
 
 def _snippet(chunk: Any) -> str:
