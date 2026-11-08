@@ -102,8 +102,7 @@ HERO_ACCENT = "documents"
 #: The promise under the title: what an answer here is made of. Kept to one sentence so
 #: the hero stays two muted lines at any width rather than a paragraph.
 HERO_SUB = (
-    "Answers come only from the documents in this workspace, and every claim carries "
-    "its citation."
+    "Answers come only from the documents in this workspace, and every claim carries its citation."
 )
 
 #: The eyebrow above the chip grid, in the reference layout's small uppercase register.
@@ -246,8 +245,6 @@ def render_empty_state(*, doc_labels: Sequence[str] | None = None) -> str | None
 
 
 def _hero_subtext(doc_labels: Sequence[str] | None) -> str:
-    """The hero's muted subtext: what is indexed here, then what an answer is made of."""
-
     if doc_labels:
         return f"Indexed and searchable: {', '.join(doc_labels)}. {HERO_SUB}"
     return f"{HERO_NO_DOCS} {HERO_SUB}"
@@ -439,8 +436,6 @@ def _emit_html(markup: str) -> None:
 
 
 def _escape(text: object) -> str:
-    """Escape document-derived text for HTML."""
-
     return _html.escape(str(text), quote=True)
 
 
@@ -593,8 +588,6 @@ def _answers_by_turn_id(messages: Sequence[object]) -> dict[int, object]:
 
 
 def _is_user_turn(turn: object) -> bool:
-    """True when a stored turn is a question (``role == 'user'``)."""
-
     return getattr(turn, "role", "") == "user"
 
 
@@ -605,8 +598,6 @@ def _turn_content(turn: object) -> str:
 
 
 def _turn_id(turn: object) -> int | None:
-    """The stored turn's row id, or ``None`` — used to find its answer row."""
-
     turn_id = getattr(turn, "id", None)
     return turn_id if isinstance(turn_id, int) else None
 
