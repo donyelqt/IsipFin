@@ -64,7 +64,6 @@ _HEADING_NUMBERED = re.compile(r"^(\d+\.|[A-Z]\.)\s+[A-Z]")
 # NOT used, because a single-word section heading is legal (the test fixture's
 # "CONTINGENCIES") and a word gate silently drops it.
 _MIN_HEADING_CHARS = 10
-# "(table|note) <n>" style captions, used only as a table-page hint.
 _TABLE_CAPTION = re.compile(r"(table|note)\s+\d+", re.IGNORECASE)
 
 # Header/footer recurrence threshold (ADR-004 rule: >=60% of pages).
@@ -202,7 +201,6 @@ def table_to_markdown(table: _Table) -> str:
 
 
 def extract_tables(page: pdfplumber.page.Page) -> list[str]:
-    """Markdown tables found on one page; empty when no grid is detected."""
     grids = page.extract_tables() or []
     return [md for md in (table_to_markdown(g) for g in grids) if md]
 
