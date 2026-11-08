@@ -60,7 +60,6 @@ class LocalEmbeddingError(RuntimeError):
 
 
 def local_model_name() -> str:
-    """The configured local model id: ``LOCAL_EMBEDDING_MODEL`` or the default."""
     return os.environ.get(LOCAL_EMBEDDING_MODEL_ENV, "").strip() or DEFAULT_LOCAL_EMBEDDING_MODEL
 
 
@@ -114,7 +113,6 @@ class LocalEmbedder:
 
     @property
     def model_name(self) -> str:
-        """The Hugging Face model id this embedder loads."""
         return self._model_name
 
     @property
