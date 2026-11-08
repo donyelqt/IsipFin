@@ -1427,5 +1427,4 @@ def eyebrow(text: str) -> None:
 
 
 def footer_note(text: str) -> None:
-    """Render the one small muted status line under the composer."""
     _emit(f'<div class="{_class_list("isip-footer")}">{_escape(text)}</div>')
