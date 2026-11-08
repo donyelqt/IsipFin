@@ -89,7 +89,6 @@ class Session:
 
     @classmethod
     def from_row(cls, row: Any) -> Session:
-        """Rebuild a session from a ``SELECT`` row (``turn_count`` optional)."""
         # ``sqlite3.Row`` is keyed access, not a mapping: only the list-sessions
         # query carries ``turn_count``, so its absence is checked against the row's
         # actual keys rather than assumed.
@@ -304,7 +303,6 @@ class SessionStore:
         return self._require_session(session_id)
 
     def find_session(self, session_id: str) -> Session | None:
-        """The session row, or ``None`` when it does not exist (render-path read)."""
         row = self._store.query_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
         return None if row is None else Session.from_row(row)
 
@@ -608,7 +606,6 @@ class SessionStore:
         return (as_int(current, "turns.seq") or 0) + 1
 
     def _turns(self, session_id: str, limit: int | None = None) -> tuple[Turn, ...]:
-        """All turns of a session, oldest first; ``limit`` keeps the newest ones."""
         sql = "SELECT * FROM turns WHERE session_id = ? ORDER BY seq ASC"
         params: list[Any] = [session_id]
         if limit is not None:
@@ -668,14 +665,12 @@ def _new_session_id() -> str:
 
 
 def _validate_role(role: str) -> str:
-    """Normalize and check a turn role against the schema's ``'user'|'assistant'``."""
     if role not in (ROLE_USER, ROLE_ASSISTANT):
         raise ValueError(f"role must be {ROLE_USER!r} or {ROLE_ASSISTANT!r}, got {role!r}")
     return role
 
 
 def _validate_window(n: int) -> int:
-    """History-window size: a positive integer (``HISTORY_WINDOW`` by default)."""
     if not isinstance(n, int) or isinstance(n, bool):
         raise ValueError(f"history window must be an integer, got {type(n).__name__}")
     if n < 1:
@@ -688,7 +683,6 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _required_int(value: Any, field: str) -> int:
-    """Coerce a required numeric field, rejecting ``None``."""
     coerced = as_int(value, field)
     if coerced is None:
         raise ValueError(f"{field} is required")
@@ -706,7 +700,6 @@ def _section_path(raw: Any) -> tuple[str, ...]:
 
 
 def _section_sequence(value: Any) -> tuple[str, ...]:
-    """Validate and coerce a section path into a tuple of strings."""
     if value is None:
         return ()
     if isinstance(value, str):
