@@ -80,8 +80,6 @@ class StoreLookupError(RuntimeError):
 
 @dataclass(frozen=True)
 class Session:
-    """One chat session (the ``sessions`` row plus its turn count, when listed)."""
-
     id: str
     title: str | None
     created_at: str
@@ -112,8 +110,6 @@ class Session:
 
 @dataclass(frozen=True)
 class Turn:
-    """One user or assistant turn (the ``turns`` row)."""
-
     id: int
     session_id: str
     seq: int
@@ -163,7 +159,6 @@ class Citation:
 
     @classmethod
     def from_row(cls, row: Any) -> Citation:
-        """Rebuild a citation from a ``SELECT`` row, decoding ``section_path`` JSON."""
         return cls(
             id=as_int(row["id"], "citations.id"),
             message_id=as_int(row["message_id"], "citations.message_id"),
@@ -228,7 +223,6 @@ class SessionHistory:
 
     @property
     def last_user_turn(self) -> Turn | None:
-        """The most recent user turn, or ``None`` for a fresh session."""
         for turn in reversed(self.turns):
             if turn.is_user:
                 return turn
@@ -658,7 +652,6 @@ class SessionStore:
         )
 
     def _citations_for(self, message_id: int) -> tuple[Citation, ...]:
-        """Citations of one message, in ``ref_index`` order."""
         rows = self._store.query_all(
             "SELECT * FROM citations WHERE message_id = ? ORDER BY ref_index ASC, id ASC",
             (message_id,),
@@ -691,7 +684,6 @@ def _validate_window(n: int) -> int:
 
 
 def _optional_int(value: Any) -> int | None:
-    """Coerce an optional numeric field, keeping ``None`` as ``None``."""
     return None if value is None else as_int(value, "numeric field") or 0
 
 
