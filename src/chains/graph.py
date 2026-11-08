@@ -267,8 +267,6 @@ def route_after_retrieve(state: Any, weak: bool | None = None) -> str:
 
 
 def _has_chunks(state: Any) -> bool:
-    """True when ``retrieved`` holds at least one chunk (the fallback gate reading)."""
-
     if isinstance(state, Mapping):
         raw = state.get("retrieved")
     else:
