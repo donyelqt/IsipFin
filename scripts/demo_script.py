@@ -22,7 +22,6 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(mes
 
 
 def catalog() -> list[DocSummary]:
-    """The document catalog as the app builds it, from the real on-disk index."""
     path = Path("data/index/docs.jsonl")
     if not path.is_file():
         return []
@@ -51,7 +50,6 @@ def show_step_prelude(state: dict, plan: QueryPlan | None) -> None:
 
 
 def run_step(number: int, question: str, docs: list[DocSummary]) -> None:
-    # Run the individual nodes the way the graph runs them, in the graph's own order.
     from src.chains.graph import (
         ANALYZE_ROUTES,
         RETRIEVE_ROUTES,
@@ -131,7 +129,6 @@ def main() -> int:
     run_step(5, "which segment drove that?", docs)
     run_step(6, "What was revenue in 2019?", docs)
 
-    # The pure retrieval half, over the real index, for the record.
     print("-" * 78)
     print("raw retrieve() over the real data/index (module-level, no graph)")
     print("-" * 78)
