@@ -796,8 +796,6 @@ def _switch_to(store: SessionStore, session_id: str) -> None:
 
 
 def _toggle_sessions_expanded() -> None:
-    """Flip the session list's expansion flag (the "show all" control)."""
-
     st.session_state[SESSIONS_EXPANDED_KEY] = not bool(st.session_state.get(SESSIONS_EXPANDED_KEY))
 
 
@@ -904,8 +902,6 @@ def _queue_delete(session_id: str) -> None:
 
 
 def _apply_pending_delete(store: SessionStore) -> None:
-    """Write the queued delete, then point the rail at a surviving session."""
-
     session_id = st.session_state.pop(PENDING_DELETE_KEY, None)
     if not isinstance(session_id, str) or not session_id:
         return
@@ -1173,8 +1169,6 @@ def _render_top_p() -> float:
 
 
 def _render_max_tokens() -> int:
-    """The completion-length cap."""
-
     return st.number_input(
         "Max tokens",
         min_value=MAX_TOKENS_MIN,
