@@ -78,7 +78,6 @@ _REQUIRED_FIELDS = (
 
 
 def tokenize(text: str) -> list[str]:
-    """Lowercased ``\\w+`` tokens of ``text`` — the sparse index's tokenization."""
     return _TOKEN.findall(text.lower())
 
 
@@ -207,7 +206,6 @@ def _read_jsonl(path: Path) -> list[ChunkRecord]:
 
 
 def _write_jsonl(path: Path, records: Iterable[ChunkRecord]) -> None:
-    """Write the source-of-truth JSONL, one record per line, in record order."""
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         for record in records:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False))
@@ -238,7 +236,6 @@ def _read_tokens(path: Path, expected: int) -> list[list[str]] | None:
 
 
 def _read_vectors(path: Path, expected: int) -> np.ndarray | None:
-    """Read the FAISS artifact, or ``None`` when absent, unreadable, or stale."""
     if not path.is_file() or expected == 0:
         return None
     try:
@@ -287,7 +284,6 @@ class ChunkIndex:
     # --- engines -----------------------------------------------------------------
 
     def _build_engines(self) -> None:
-        """Build the FAISS index (row = record position) and the lazy BM25 index."""
         if self._vectors is not None and self._vectors.shape[0]:
             dense = faiss.IndexFlatIP(int(self._vectors.shape[1]))
             # Vectors are always stored in record order and contiguous, so a plain
