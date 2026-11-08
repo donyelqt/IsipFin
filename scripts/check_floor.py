@@ -82,7 +82,6 @@ def scan(files: list[Path], only_added: bool) -> list[tuple[Path, int, str, str]
     for f in files:
         lines = f.read_text(encoding="utf-8").splitlines()
         if only_added:
-            # New files scan whole; modified files are compared by content vs HEAD.
             head = subprocess.run(
                 ["git", "show", f"HEAD:{f.as_posix()}"],
                 capture_output=True,
