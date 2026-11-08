@@ -543,8 +543,6 @@ def _keyed(role_key: str, suffix: str | None) -> str:
 
 
 def _turn_key(turn: object) -> str | None:
-    """A stored turn's row id as a widget-key suffix, or ``None`` when unreadable."""
-
     turn_id = _turn_id(turn)
     return None if turn_id is None else str(turn_id)
 
@@ -592,8 +590,6 @@ def _is_user_turn(turn: object) -> bool:
 
 
 def _turn_content(turn: object) -> str:
-    """The stored turn's text, or ``""`` when the row carries none."""
-
     return str(getattr(turn, "content", "") or "")
 
 
