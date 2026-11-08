@@ -182,8 +182,6 @@ class IndexStatus:
 
 @dataclass(frozen=True)
 class IngestResult:
-    """The outcome of one ingest run: one :class:`FileResult` per upload, plus the index."""
-
     files: tuple[FileResult, ...] = ()
     index: IndexStatus = field(
         default_factory=lambda: IndexStatus(False, 0, 0, 0, "0 B", INDEX_EMPTY)
@@ -433,7 +431,6 @@ def _scaled_report(
     share: float,
     message: str,
 ) -> None:
-    """Turn one file's 0..1 progress into the run's 0..1 progress across ``total`` files."""
     if on_progress is None:
         return
     overall = (done + min(max(share, 0.0), 1.0)) / total
@@ -552,7 +549,6 @@ def _ingest_one(
 
 
 def _load_embedder(embedder: Embedder | None, resolved: dict[str, Any]) -> tuple[Embedder, str]:
-    """The embedder for this run: the injected one, else the builder's policy, cached once."""
     if embedder is not None:
         return embedder, "caller-supplied embedder"
     if "embedder" not in resolved:
@@ -609,7 +605,6 @@ def _scanned_warning(document: Any) -> str | None:
 
 
 def _upload_name(file: Any) -> str:
-    """The display name of an upload, falling back to a placeholder when it carries none."""
     name = str(getattr(file, "name", "") or "").strip()
     return name or "uploaded document"
 
@@ -655,7 +650,6 @@ def _digest_of(path: Path) -> str:
 
 
 def _readable(prefix: bytes) -> str:
-    """Printable rendering of raw leading bytes: ``PK\\x03\\x04``, never a bare control code."""
     return "".join(chr(byte) if 32 <= byte < 127 else f"\\x{byte:02x}" for byte in prefix)
 
 
@@ -868,7 +862,6 @@ def render_document_catalog(
 
 
 def _render_catalog_row(entry: Mapping[str, Any]) -> None:
-    """One catalog row: filename, short id, page and section counts, sections in an expander."""
     filename = html.escape(str(entry.get("filename") or "unnamed document"))
     doc_id = str(entry.get("doc_id") or "")
     pages = int(entry.get("page_count") or 0)
