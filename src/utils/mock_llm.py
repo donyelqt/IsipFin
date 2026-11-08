@@ -99,8 +99,7 @@ KNOWN_QUESTIONS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
         {
             "figure": "$ 88,523",
             "answer": (
-                "FY2023 operating income was **$88,523 million**, versus $83,383 million "
-                "in FY2022"
+                "FY2023 operating income was **$88,523 million**, versus $83,383 million in FY2022"
             ),
         },
     ),
@@ -220,8 +219,6 @@ _FOLLOW_UP_MARKERS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class _Script:
-    """The message payload reduced to the parts the scripted answer depends on."""
-
     family: str
     question: str
     context: str
@@ -335,7 +332,6 @@ def _family_for(schema: dict[str, Any] | None, system: str) -> str:
 
 
 def _tokens(question: str) -> set[str]:
-    """Lowercased word tokens of the question."""
     return set(re.findall(r"[a-z0-9]+", question.lower()))
 
 
@@ -364,7 +360,6 @@ def _asked_year(question: str) -> str | None:
 
 
 def _out_of_scope(question: str) -> bool:
-    """True when the question targets a year the reference corpus does not cover."""
     year = _asked_year(question)
     return year is not None and year in _UNSUPPORTED_YEARS
 
@@ -660,7 +655,6 @@ def _grounding_result(body: str) -> dict[str, Any]:
 
 
 def _citation_marks(text: str) -> list[str]:
-    """The citation markers a snippet carries, with their numbering."""
     return re.findall(r"\[(\d+)\]", text)
 
 
@@ -754,7 +748,6 @@ def _schema_default(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_value(sub_schema: Any) -> Any:
-    """The schema-typed zero value for one property."""
     if not isinstance(sub_schema, dict):
         return None
     for value in sub_schema.get("enum") or []:
