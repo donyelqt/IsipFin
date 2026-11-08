@@ -115,8 +115,6 @@ VERDICT_SUPPORTED = "supported"
 
 
 def _answer_of(state: GraphState) -> str:
-    """The candidate answer this node verifies."""
-
     answer = state.get("answer_md")
     return answer.strip() if isinstance(answer, str) else ""
 
