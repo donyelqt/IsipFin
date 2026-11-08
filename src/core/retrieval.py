@@ -258,7 +258,6 @@ class HybridRetriever:
 
     @property
     def index(self) -> ChunkIndex:
-        """The underlying chunk index (records, vectors, token lists)."""
         return self._index
 
     def retrieve(
@@ -627,7 +626,6 @@ class HybridIndexHandle:
 
     @property
     def index(self) -> ChunkIndex:
-        """The chunk index this handle serves: records, vectors, token lists."""
         return self._index
 
     # --- queries -----------------------------------------------------------------
@@ -647,7 +645,6 @@ class HybridIndexHandle:
         self._directory = Path(target)
 
     def directory(self) -> Path | None:
-        """Directory this handle was loaded from or saved to, if any."""
         return self._directory
 
 
