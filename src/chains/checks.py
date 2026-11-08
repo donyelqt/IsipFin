@@ -421,9 +421,6 @@ def _agrees(claim: Figure, span: Figure) -> bool:
 
 
 def _same_digits(left: float, left_sig: int, right: float, right_sig: int) -> bool:
-    """True when two printed number strings agree once both are rounded to the coarser
-    precision — the same digits, whatever unit each side declared."""
-
     if left == right:
         return True
     sig = min(left_sig, right_sig)
@@ -431,8 +428,6 @@ def _same_digits(left: float, left_sig: int, right: float, right_sig: int) -> bo
 
 
 def _same_magnitude(left: float, left_sig: int, right: float, right_sig: int) -> bool:
-    """True when two magnitudes agree once both are rounded to the coarser precision."""
-
     if left == right:
         return True
     sig = min(left_sig, right_sig)
@@ -510,8 +505,6 @@ class _SpanIndex:
     def _years_of_line(
         self, start: int, end: int, tokens: Sequence[tuple[int, int, Figure]]
     ) -> list[tuple[int, int]]:
-        """Period labels on one line, excluding any that overlap a figure token."""
-
         inside = [
             (token_start, token_end)
             for token_start, token_end, _ in tokens
@@ -590,8 +583,6 @@ class _SpanIndex:
         return [token for token in self._line_figures.get(line_number, []) if not token[2].percent]
 
     def periods(self) -> frozenset[int]:
-        """Every period the span displays, wherever it is printed."""
-
         return frozenset({year for years in self._line_years.values() for _, year in years})
 
 
@@ -659,8 +650,6 @@ def split_units(answer: str) -> list[ClaimUnit]:
 
 
 def _flush_table(rows: list[tuple[str, int]], units: list[ClaimUnit], lead: str | None) -> None:
-    """Turn one contiguous markdown table into one unit per body row."""
-
     if not rows:
         return
     markers: list[int] = []
@@ -713,8 +702,6 @@ def _table_periods(rows: list[tuple[str, int]]) -> tuple[int, ...]:
 
 
 def _is_separator_row(cells: list[str]) -> bool:
-    """True for the ``|---|---|`` row that separates a table's header from its body."""
-
     return all(cell and set(cell) <= {"-", ":", " "} for cell in cells)
 
 
