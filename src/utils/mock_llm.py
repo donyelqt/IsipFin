@@ -231,7 +231,6 @@ class _Script:
 
 
 def _canonical(messages: list[dict[str, Any]], schema: dict[str, Any] | None) -> str:
-    """Stable JSON text of the request: sorted keys, fixed separators, no whitespace drift."""
     return json.dumps(
         {"messages": messages, "schema": schema},
         sort_keys=True,
@@ -297,7 +296,6 @@ def _question_text(messages: list[dict[str, Any]]) -> str:
 
 
 def _body_text(messages: list[dict[str, Any]]) -> str:
-    """Everything except the system prompt: cited blocks, catalog, history, question."""
     return "\n".join(
         _message_text(message) for message in messages if message.get("role") != "system"
     )
@@ -336,7 +334,6 @@ def _tokens(question: str) -> set[str]:
 
 
 def _matches_question(question: str, phrases: tuple[str, ...]) -> bool:
-    """True when any phrase appears in the question (whole-phrase substring match)."""
     lowered = f" {question.lower()} "
     return any(f" {phrase}" in lowered for phrase in phrases)
 
@@ -365,7 +362,6 @@ def _out_of_scope(question: str) -> bool:
 
 
 def _is_comparison(question: str) -> bool:
-    """True for a question that asks for two periods or two metrics side by side."""
     lowered = question.lower()
     periods = _distinct_periods(question)
     comparative = any(
@@ -378,7 +374,6 @@ def _is_comparison(question: str) -> bool:
 
 
 def _numbered_blocks(context: str) -> list[tuple[int, str]]:
-    """The ``[n] text`` blocks a synthesis prompt receives, parsed by their markers."""
     blocks: list[tuple[int, str]] = []
     for match in re.finditer(r"\[(\d+)\]\s*(.*?)(?=\n\s*\[\d+\]|\Z)", context, re.DOTALL):
         blocks.append((int(match.group(1)), match.group(2).strip()))
@@ -386,7 +381,6 @@ def _numbered_blocks(context: str) -> list[tuple[int, str]]:
 
 
 def _cited_blocks(blocks: list[tuple[int, str]], figure: str | None) -> list[int]:
-    """The block numbers whose text contains the figure; every block when there is no figure."""
     if figure is None:
         return [number for number, _ in blocks]
     compact = figure.replace(" ", "")
@@ -408,7 +402,6 @@ def _candidate_answer(body: str) -> str:
 
 
 def _compact(text: str) -> str:
-    """Text with spaces and thousands separators removed, so "$ 211,915" == "$211915"."""
     return text.replace(" ", "").replace(",", "")
 
 
@@ -536,7 +529,6 @@ def _paths(parts: list[str]) -> list[str]:
 
 
 def _value_paths(text: str, at: int) -> list[str]:
-    """The section paths named by the value starting at ``at``: an array, or a lone string."""
     index = at
     while index < len(text) and text[index].isspace():
         index += 1
@@ -717,7 +709,6 @@ def _is_follow_up(question: str) -> bool:
 
 
 def _topic_of(text: str) -> str:
-    """The document-labelled metric the text is about, or ``""`` when it names none."""
     lowered = text.lower()
     for alias, label in _TOPIC_ALIASES:
         if alias in lowered:
@@ -853,12 +844,10 @@ class MockLLM:
 
 
 def _conform(payload: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
-    """``payload`` when it already satisfies ``schema``, else a schema-shaped fallback."""
     if schema is None or not validate_json_schema(payload, schema):
         return payload
     return _schema_default(schema)
 
 
 def _json(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """One JSON object, both as its single-line text and as the parsed mapping."""
     return json.dumps(payload, ensure_ascii=True), payload
