@@ -127,7 +127,6 @@ class Source:
 
 
 def fmt_size(size_bytes: int) -> str:
-    """Human-readable byte count, so sizes stay obvious in the output."""
     value = float(size_bytes)
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024.0:
@@ -139,7 +138,6 @@ def fmt_size(size_bytes: int) -> str:
 
 
 def escape_bytes(prefix: bytes) -> str:
-    """Printable rendering of raw bytes: ``PK\\x03\\x04``, never a bare control code."""
     return "".join(chr(byte) if 32 <= byte < 127 else f"\\x{byte:02x}" for byte in prefix)
 
 
@@ -205,7 +203,6 @@ def manifest_path(directory: Path) -> Path:
 
 
 def read_manifest(directory: Path) -> dict[str, Source]:
-    """The recorded sources keyed by filename; ``{}`` when nothing was installed yet."""
     path = manifest_path(directory)
     if not path.is_file():
         return {}
@@ -260,7 +257,6 @@ def fetch(url: str, target: Path, timeout: float) -> Fetched:
 
 
 def require_pdf(fetched: Fetched, url: str) -> bytes:
-    """Reject a non-PDF response, naming the bytes actually received."""
     prefix = read_prefix(fetched.path)
     if prefix.startswith(PDF_MAGIC):
         return prefix
@@ -277,7 +273,6 @@ def require_pdf(fetched: Fetched, url: str) -> bytes:
 
 
 def check_source(url: str, timeout: float) -> int:
-    """Probe a candidate URL without installing anything into ``data/pdfs/``."""
     print(f"checking {url}")
     with tempfile.TemporaryDirectory(prefix="isipfin-corpus-check-") as scratch:
         target = Path(scratch) / filename_from_url(url)
@@ -299,7 +294,6 @@ def check_source(url: str, timeout: float) -> int:
 
 
 def install_source(url: str, directory: Path, filename: str, timeout: float, force: bool) -> int:
-    """Install ``url`` into ``directory/filename``; a no-op when the digest is unchanged."""
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / filename
     sources = read_manifest(directory)
