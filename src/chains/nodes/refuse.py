@@ -283,8 +283,6 @@ def _filename_subject(docs: Sequence[DocSummary]) -> str:
 
 
 def _subjects_of(docs: Sequence[DocSummary]) -> list[str]:
-    """The catalog's subject names: section roots first, the filename as the fallback."""
-
     heads = _subject_headings(docs)
     if heads:
         return heads
@@ -417,8 +415,6 @@ def _topic_copy(docs: Sequence[DocSummary]) -> str:
 
 
 def _entity_copy(question: str) -> str:
-    """The ``entity`` coverage: the outside entity the question concerns, read from the question."""
-
     mentions = _entity_mentions(question)
     if mentions:
         named = _join(mentions)
