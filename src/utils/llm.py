@@ -429,7 +429,6 @@ def validate_json_schema(payload: Any, schema: dict[str, Any]) -> list[str]:
 
 
 def _validate(payload: Any, schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    """One node of the schema tree; accumulate violations into ``errors``."""
     expected = schema.get("type")
     if isinstance(expected, str):
         expected = [expected]
@@ -456,7 +455,6 @@ def _validate(payload: Any, schema: dict[str, Any], path: str, errors: list[str]
 def _validate_object(
     payload: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str]
 ) -> None:
-    """Required keys, per-property sub-schemas and ``additionalProperties``."""
     properties = schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     required = schema.get("required")
@@ -478,7 +476,6 @@ def _validate_object(
 def _validate_array(
     payload: list[Any], schema: dict[str, Any], path: str, errors: list[str]
 ) -> None:
-    """Per-item sub-schema plus the item-count bounds."""
     items = schema.get("items")
     if isinstance(items, dict):
         for index, value in enumerate(payload):
@@ -559,7 +556,6 @@ def _provider_error_classes(*names: str) -> tuple[type[BaseException], ...]:
 
 
 def _status_of(exc: BaseException) -> int | None:
-    """The HTTP status the exception carries, or ``None`` when it carries none."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, bool) or not isinstance(status, int):
         return None
@@ -793,7 +789,6 @@ _CLOSE_SPELLINGS = ("close", "aclose")
 
 
 def _resolve_close(client: Any) -> Callable[[], Awaitable[None]] | None:
-    """The client's async close method under whichever spelling it exposes, or ``None``."""
     for spelling in _CLOSE_SPELLINGS:
         candidate = getattr(client, spelling, None)
         if asyncio.iscoroutinefunction(candidate):
@@ -869,7 +864,6 @@ class ChatLLM:
 
     @property
     def closed(self) -> bool:
-        """Whether the underlying client has been closed by :meth:`aclose`."""
         return self._closed
 
     async def aclose(self) -> None:
@@ -917,7 +911,6 @@ class ChatLLM:
         exc: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Leave the scope with the client closed, success or failure alike."""
         await self.aclose()
 
     async def chat(
@@ -1019,7 +1012,6 @@ class ChatLLM:
         return request
 
     def _resolve_model(self, params: LLMParams) -> str:
-        """The model for one call: the per-call override, else the client's configured one."""
         model = params.model or self._model
         if not model:
             raise LLMError(
@@ -1029,7 +1021,6 @@ class ChatLLM:
         return model
 
     def _resolve_sleep(self) -> Callable[[float], Awaitable[None]]:
-        """The injected sleeper, else the module-level default resolved per call."""
         return self._sleep if self._sleep is not None else default_sleep
 
     def _retry_delay(
@@ -1050,7 +1041,6 @@ class ChatLLM:
         return jitter(backoff_delay(attempt, self._backoff_base_s, self._backoff_cap_s))
 
     def _resolve_jitter(self) -> Callable[[float], float]:
-        """The injected jitter function, else the module-level default resolved per call."""
         return self._jitter if self._jitter is not None else default_jitter
 
     async def _send_with_retries(self, request: dict[str, Any]) -> Any:
@@ -1070,7 +1060,6 @@ class ChatLLM:
                 await sleeper(self._retry_delay(attempts, exc, error, jitter))
 
     def _to_result(self, completion: Any) -> ChatResult:
-        """The provider payload reduced to the frozen :class:`ChatResult` fields."""
         choices = getattr(completion, "choices", None) or []
         if not choices:
             raise LLMError("the model returned no choices")
