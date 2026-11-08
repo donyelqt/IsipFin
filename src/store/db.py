@@ -331,7 +331,6 @@ class ChatStore:
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """The single underlying connection (advanced callers only)."""
         return self._connection
 
     def close(self) -> None:
@@ -364,15 +363,12 @@ class ChatStore:
         self._connection.execute("COMMIT")
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
-        """Run one statement in autocommit mode and return its cursor."""
         return self._connection.execute(sql, tuple(params))
 
     def query_all(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
-        """All rows of a read query, in the order the query produces."""
         return list(self._connection.execute(sql, tuple(params)))
 
     def query_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
-        """The first row of a read query, or ``None`` when it matched nothing."""
         rows = self.query_all(sql, params)
         return rows[0] if rows else None
 
@@ -413,12 +409,10 @@ class ChatStore:
         return document
 
     def get_document(self, doc_id: str) -> Document | None:
-        """The registered document, or ``None`` when the id is unknown."""
         row = self.query_one("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
         return None if row is None else Document.from_row(row)
 
     def list_documents(self) -> list[Document]:
-        """Every registered document, oldest ingestion first."""
         rows = self.query_all("SELECT * FROM documents ORDER BY indexed_at, doc_id")
         return [Document.from_row(row) for row in rows]
 
