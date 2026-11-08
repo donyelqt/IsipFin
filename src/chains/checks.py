@@ -387,8 +387,6 @@ def _per_share_of(text: str) -> bool:
 
 
 def _round_sig(value: float, sig: int) -> float:
-    """``value`` rounded to ``sig`` significant figures."""
-
     if value == 0.0:
         return 0.0
     exponent = math.floor(math.log10(abs(value)))
@@ -446,8 +444,6 @@ def _same_magnitude(left: float, left_sig: int, right: float, right_sig: int) ->
 
 
 def _years_in(text: str) -> list[tuple[int, int]]:
-    """``(offset, year)`` for every period label in ``text``."""
-
     return [(match.start(), int(match.group(0))) for match in _YEAR.finditer(text)]
 
 
@@ -745,8 +741,6 @@ def _split_line(line: str, base: int, units: list[ClaimUnit]) -> None:
 
 
 def _unit(body: str, base: int, start: int, end: int, prefix: str, suffix: str) -> ClaimUnit:
-    """Build one claim from a slice of a source line."""
-
     text = body[start:end]
     prose = _MARKER.sub(" ", text)
     markers = tuple(int(match.group(1)) for match in _MARKER.finditer(text))
@@ -950,8 +944,6 @@ def rejected_units(judgements: Sequence[ClaimJudgement]) -> list[ClaimUnit]:
 
 
 def undecided_units(judgements: Sequence[ClaimJudgement]) -> list[ClaimUnit]:
-    """The claim units the pre-pass could not settle, in document order."""
-
     return [judgement.unit for judgement in judgements if judgement.outcome == OUTCOME_UNDECIDED]
 
 
