@@ -96,8 +96,6 @@ def _block_text(chunk: ScoredChunk) -> str:
 
 
 def _rank_of(chunk: ScoredChunk) -> int:
-    """The chunk's fused rank, tolerating an unset or nonsensical value."""
-
     rank = chunk.fused_rank
     return rank if isinstance(rank, int) and rank >= 0 else _UNRANKED
 
@@ -159,8 +157,6 @@ def _render_block(number: int, chunk: ScoredChunk) -> str:
 
 
 def _context_header(shown: int, retrieved: int, dropped: int) -> str:
-    """The ``CONTEXT:`` preamble line, naming what was packed and what was dropped."""
-
     if shown == 0:
         return "CONTEXT: no document passages were retrieved for this question."
     if dropped == 0:
@@ -364,8 +360,7 @@ def synthesize_answer(state: GraphState) -> dict[str, Any]:
         # A completion with no text is a failure, not an answer: ADR-007's hard rule is that
         # no path renders an empty answer, so this raises as a typed, traced error instead.
         raise LLMError(
-            "the model returned an empty answer; retry the turn — nothing was fabricated "
-            "to fill it"
+            "the model returned an empty answer; retry the turn — nothing was fabricated to fill it"
         )
 
     numbers = set(range(1, len(blocks) + 1))
