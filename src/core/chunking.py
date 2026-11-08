@@ -68,7 +68,6 @@ CHILD_OVERLAP_TOKENS = 50
 # that fits, so tables break between rows and prose breaks between sentences.
 SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
-# A markdown separator row such as |---|---| or | :-- | --: |.
 _MD_ROW_SEPARATOR = re.compile(r"^[\s|:\-]+$")
 
 # Sentence terminator: a period (or ! or ?) followed by a space or end of
@@ -77,7 +76,6 @@ _MD_ROW_SEPARATOR = re.compile(r"^[\s|:\-]+$")
 # number is not a terminator because no space follows it.
 _SENTENCE_END = re.compile(r"([.!?])(?=\s)|([.!?])$")
 
-# Join between blocks in a parent, and between rows of a table fragment.
 _BLOCK_JOIN = "\n\n"
 _ROW_JOIN = "\n"
 
