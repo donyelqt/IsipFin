@@ -1,37 +1,3 @@
-"""The chat canvas: transcript renderer, citation cards, and the composer (task T18).
-
-ADR-009's boundary lives here: this module **renders** the fields the pipeline already
-decided. It reads :class:`~src.chains.state.AnswerEnvelope` (and the same fields off the
-store's :class:`~src.store.sessions.Message` rows, which is how history survives a
-reload) and calls nothing — no retrieval, no prompt, no gateway, no
-:class:`~src.chains.graph` import. Every state the demo script exercises is present:
-the centered hero for an empty session, the transcript for a populated one, a waiting
-bubble while the answer is produced, citation cards under every cited answer, an
-explicit ungrounded marker when the verifier did not pass a claim through, a
-"planner degraded" marker when the refusal is a planner failure rather than a scope
-decision, and an error block with a retry action for a failed turn.
-
-Public surface
---------------
-``render_empty_state``      centered hero: mark, title, subtext, demo-question chips
-``render_transcript``       a session's full transcript, oldest turn first
-``render_answer``           one live :class:`AnswerEnvelope`
-``render_stored_answer``    one stored assistant answer
-``render_citation_card``    one ``[n]`` → document · page · section · snippet card
-``render_pending_answer``   the waiting bubble while the graph runs
-``render_answer_error``     a failed turn, with an optional retry action
-``render_composer``         the docked question box; returns the submitted text
-``render_footer_note``      the one muted status line under the canvas
-
-The canvas is theme-aware rather than theme-agnostic: it is built from Streamlit-native
-primitives (``st.chat_message``, ``st.chat_input``, ``st.expander``) and marks its own
-role containers with the widget keys the theme's stylesheet targets
-(``st-key-isip-answer`` for the assistant's accent left rule, ``st-key-isip-question``
-for the dimmed question). Citation cards are one complete ``st.html`` fragment per card
-using the theme's ``isip-panel``/``isip-chip``/``isip-figure`` classes, with every
-document-derived value HTML-escaped, so a filename or snippet cannot inject markup.
-"""
-
 from __future__ import annotations
 
 import html as _html
@@ -51,7 +17,7 @@ from src.components.theme import hero_mark as theme_hero_mark
 from src.components.theme import hero_sub as theme_hero_sub
 from src.components.theme import hero_title as theme_hero_title
 
-if TYPE_CHECKING:  # contract types only — no runtime import, so the module stays leaf-level
+if TYPE_CHECKING:
     from src.chains.state import AnswerEnvelope
 
 __all__ = [
@@ -67,57 +33,29 @@ __all__ = [
     "render_transcript",
 ]
 
-#: Widget keys for the role containers inside each chat bubble. The theme's stylesheet
-#: targets the frontend-derived ``st-key-<key>`` classes on these containers to draw
-#: the answer's accent rule and dim the question (``st.chat_message`` takes no
-#: ``key`` itself, and separate ``st.html`` calls are sibling blocks — verified — so
-#: a keyed container is the only hook that really wraps the content). The theme
-#: matches these as **prefix** selectors, so these two prefixes are reserved: no
-#: other widget key in this app may start with ``isip-answer-`` or
-#: ``isip-question-``, or it inherits the role's border/padding.
 _ANSWER_KEY = "isip-answer"
 _QUESTION_KEY = "isip-question"
 
-#: Session-state counter backing :func:`_keyed`'s generated suffixes. Not a widget
-#: state and not durable app data — it only has to be distinct within one run.
 _KEY_COUNTER_KEY = "_isip_chat_key_counter"
 
-#: CSS class names :mod:`src.components.theme`'s stylesheet defines, used by this
-#: module's own markup. Listed here rather than referenced through ``CSS_CLASSES`` so
-#: a typo fails lint/read-time review instead of silently emitting an unstyled div.
 _CLASS_PANEL = "isip-panel"
 _CLASS_CHIP = "isip-chip"
 _CLASS_CHIP_ACCENT = "isip-chip-accent"
 _CLASS_FIGURE = "isip-figure"
 _CLASS_FIGURE_MUTED = "isip-figure-muted"
 
-#: The hero title shown on a session that has never been asked anything. The word
-#: :data:`HERO_ACCENT` inside it renders in the accent colour, the way a name does in
-#: the reference layout — that one tinted word is what makes the greeting read as ours.
 HERO_GREETING = "Ask your documents anything."
 
-#: The substring of :data:`HERO_GREETING` the hero tints. Must occur in it verbatim.
 HERO_ACCENT = "documents"
 
-#: The promise under the title: what an answer here is made of. Kept to one sentence so
-#: the hero stays two muted lines at any width rather than a paragraph.
 HERO_SUB = (
     "Answers come only from the documents in this workspace, and every claim carries its citation."
 )
 
-#: The eyebrow above the chip grid, in the reference layout's small uppercase register.
 HERO_EYEBROW = "TRY A DEMO"
 
-#: Shown on the hero when no document has been indexed yet — the honest empty state,
-#: so an empty canvas reads as "upload first" rather than as a broken page.
 HERO_NO_DOCS = "No document indexed yet — upload a PDF in the sidebar, then ask."
 
-#: The six demo questions the hero offers, each paired with the Material Symbols icon
-#: its chip wears. Order matters: the grid fills three columns row by row, and the
-#: sequence walks the demo script — a cited figure, a period comparison, a
-#: best-segment pick, the two headline figures, the summary, then the trend. Every
-#: string is a golden-set question, so a chip click exercises a path we have evidence
-#: for instead of producing an answer nobody reviewed.
 _SUGGESTION_CHIPS: tuple[tuple[str, str], ...] = (
     ("What was revenue in FY2023?", ":material/show_chart:"),
     ("Compare operating income FY2023 vs FY2022", ":material/compare_arrows:"),
@@ -127,22 +65,12 @@ _SUGGESTION_CHIPS: tuple[tuple[str, str], ...] = (
     ("What was the margin trend?", ":material/trending_up:"),
 )
 
-#: The chip labels alone, in grid order — the public reading of
-#: :data:`_SUGGESTION_CHIPS`, and the exact strings a chip click returns.
 SUGGESTED_QUESTIONS: tuple[str, ...] = tuple(question for question, _ in _SUGGESTION_CHIPS)
 
-#: The chip grid's width in columns. Three columns of two rows is the reference
-#: layout's shape; the loop reads the width from here so it can never draw a ragged
-#: row by disagreeing with itself about it.
 _SUGGESTION_COLUMNS = 3
 
-#: Placeholder in the docked composer.
 COMPOSER_PLACEHOLDER = "Ask a question about your documents…"
 
-#: Caption on ``refusal_reason``: the store and the graph both record one of the five
-#: reasons ``src.chains.nodes.refuse`` writes, and this maps each to the user-facing
-#: reading. The answer's own markdown already carries the refusal sentence; this line
-#: is the short marker a reviewer can scan down the transcript.
 _REFUSAL_REASON_COPY: dict[str, str] = {
     "time_period": "The question asks about a period the indexed documents do not cover.",
     "topic": "The topic is outside what the indexed documents cover.",
@@ -151,49 +79,23 @@ _REFUSAL_REASON_COPY: dict[str, str] = {
     "unspecified": "No passage in the indexed documents supports this question.",
 }
 
-#: The explanation attached to the ungrounded marker — why a claim reaching the user
-#: is not presented as a verified one (docs/SPEC.md §10.7).
 _UNGROUNDED_COPY = (
     "Not every claim in this answer is supported by the retrieved passages — treat it "
     "as unverified and check the citations below."
 )
 
-#: The degraded-planner marker: the sentence a person asking the question reads when the
-#: turn they are looking at was never reasoned about. ``final_envelope`` carries the
-#: marker from ``analyze_question``'s degrade path onto the envelope; the debug panel
-#: renders the same badge and the same sentence, so the transcript and the panel cannot
-#: state different things about the same turn (the wording lives in
-#: :mod:`src.components.debug_panel` and is not written a second time here).
 PLANNER_DEGRADED_LABEL = debug_panel.PLANNER_DEGRADED_LABEL
 PLANNER_DEGRADED_COPY = debug_panel.PLANNER_DEGRADED_COPY
 
-#: Waiting bubble copy while the graph runs.
 PENDING_COPY = "Searching the documents, then checking the answer against them."
 
-#: Prefix for the hero chips' widget keys, suffixed with the chip's index in
-#: :data:`_SUGGESTION_CHIPS`, so the same chip on two sessions never collides.
 _SUGGESTION_KEY = "isip-suggestion"
 
-#: Longest question the composer accepts; 4000 characters is a paste of several
-#: questions, and a wall of text rarely survives analysis anyway.
 _COMPOSER_MAX_CHARS = 4000
 
 
 @dataclass(frozen=True)
 class _AnswerView:
-    """The one field set the canvas renders, read off either shape it arrives on.
-
-    :class:`AnswerEnvelope` and the store's ``Message`` row carry the same four
-    renderable fields; normalising to this view is what keeps one renderer instead of
-    a live path and a history path that drift. The citation objects themselves stay
-    duck-typed: the two packages each define their own ``Citation`` class with the
-    same five attributes.
-
-    ``planner_degraded`` is the fifth field, and it is ``None`` — never ``False`` — for
-    a stored answer, because the store persists no such column. A live envelope always
-    carries a bool, defaulting to ``False``, so a healthy planner is never marked and
-    a degraded one always is.
-    """
 
     answer_md: str
     grounded: bool | None
@@ -203,24 +105,6 @@ class _AnswerView:
 
 
 def render_empty_state(*, doc_labels: Sequence[str] | None = None) -> str | None:
-    """Render the centered hero for a session with no turns; return a clicked chip.
-
-    The hero is the canvas's only content before the first question, so it carries the
-    whole "start here" job: a centered mark, the greeting with one tinted word, the
-    muted promise, then the demo questions as a three-column chip grid. The mark,
-    title, subtext, eyebrow and footer live in :mod:`src.components.theme` — this
-    function composes them and owns only the chips, which are real Streamlit widgets.
-
-    Args:
-        doc_labels: Display names of the indexed documents, or ``None``/empty when none
-            are. Passed so the subtext can name what is actually searchable without
-            this module reading the catalog itself.
-
-    Returns:
-        The label of the clicked chip, or ``None`` when none was clicked. The caller
-        feeds the returned string into the composer's question path, so picking a chip
-        behaves exactly like typing the question.
-    """
 
     theme_hero_mark()
     theme_hero_title(HERO_GREETING, accent=HERO_ACCENT)
@@ -231,9 +115,6 @@ def render_empty_state(*, doc_labels: Sequence[str] | None = None) -> str | None
         row = _SUGGESTION_CHIPS[row_start : row_start + _SUGGESTION_COLUMNS]
         for offset, (question, icon) in enumerate(row):
             with columns[offset]:
-                # A labeled button, never an icon-only one: the icon decorates the
-                # question, and the question is what a screen reader announces
-                # (docs/CONSTRAINTS.md).
                 if st.button(
                     question,
                     key=f"{_SUGGESTION_KEY}-{row_start + offset}",
@@ -251,13 +132,6 @@ def _hero_subtext(doc_labels: Sequence[str] | None) -> str:
 
 
 def render_footer_note(text: str) -> None:
-    """Render the one muted status line under the canvas.
-
-    Args:
-        text: The line's text — what the pipeline is, how many documents are indexed,
-            and whether the run is on the offline mock model. Plain text, escaped by
-            the theme helper; it carries no markup.
-    """
 
     theme_footer_note(text)
 
@@ -268,18 +142,6 @@ def render_transcript(
     *,
     doc_names: Mapping[str, str] | None = None,
 ) -> None:
-    """Render a session's stored transcript, oldest turn first.
-
-    Args:
-        turns: Every role's turns in order — the ``SessionHistory.turns`` list. A
-            user turn renders as the question; an assistant turn renders as its answer.
-        messages: Assistant answers with their citation blocks
-            (``SessionHistory.messages``). Each is paired to its turn by turn id; an
-            assistant turn with no message row still renders, just without citations,
-            so a half-written exchange stays visible instead of silently vanishing.
-        doc_names: ``doc_id`` → display name, built by the caller from the document
-            catalog. Without it a citation shows a shortened document id.
-    """
 
     answers = _answers_by_turn_id(messages)
     for turn in turns:
@@ -301,18 +163,6 @@ def render_answer(
     doc_names: Mapping[str, str] | None = None,
     role_key: str | None = None,
 ) -> None:
-    """Render one live answer returned by ``src.chains.graph.invoke``.
-
-    Args:
-        answer: The frozen envelope: ``answer_md``, ``citations``, ``grounded``,
-            ``refusal_reason`` and ``planner_degraded``. Nothing else on the envelope
-            reaches the user from this module — ``plan``, ``retrieval_debug`` and
-            ``node_trace`` belong to the debug panel, which is a separate component.
-        doc_names: ``doc_id`` → display name for the citation cards.
-        role_key: Uniquifier for the role container's widget key. Streamlit refuses a
-            duplicate key on one page, so a transcript with several answers needs one
-            distinct value per answer; ``render_transcript`` derives it from the turn.
-    """
 
     view = _AnswerView(
         answer_md=answer.answer_md or "",
@@ -330,48 +180,23 @@ def render_stored_answer(
     doc_names: Mapping[str, str] | None = None,
     role_key: str | None = None,
 ) -> None:
-    """Render one assistant answer read back from the chat store.
-
-    The question it answered is rendered as the user turn that precedes it, so this
-    covers the answer alone: the markdown, the grounding marker, the refusal reason
-    and the citation cards — all fields of the stored ``Message`` row.
-
-    Args:
-        message: A :class:`~src.store.sessions.Message` with its ``citations``.
-        doc_names: ``doc_id`` → display name for the citation cards.
-        role_key: Uniquifier for the role container's widget key; see
-            :func:`render_answer`.
-    """
 
     view = _AnswerView(
         answer_md=str(getattr(message, "answer_md", "") or ""),
         grounded=getattr(message, "grounded", None),
         refusal_reason=(getattr(message, "refusal_reason", None) or None),
         citations=tuple(getattr(message, "citations", ()) or ()),
-        # The store persists no planner-degraded column, so a historical answer never
-        # claims one — ``None`` keeps the marker off a refusal the row never judged.
         planner_degraded=getattr(message, "planner_degraded", None),
     )
     _render_answer_view(view, doc_names=doc_names, role_key=role_key)
 
 
 def render_citation_card(citation: object, *, doc_names: Mapping[str, str] | None = None) -> None:
-    """Render one citation as an expandable card: ``[n]`` → document · page · snippet.
-
-    Args:
-        citation: Either citation class — the graph's and the store's carry the same
-            ``ref_index``/``doc_id``/``page``/``section_path``/``snippet`` attributes,
-            and ``page`` is optional in both.
-        doc_names: ``doc_id`` → display name; without it the shortened document id is
-            shown, because a raw sha256 is not something a reader can follow.
-    """
 
     ref_index, doc_id, page, section_path, snippet = _citation_fields(citation)
     doc_label = (doc_names or {}).get(doc_id) or _short_doc_label(doc_id)
     location = f"page {page}" if page is not None else "page not recorded"
     with st.expander(f"[{ref_index}]  {doc_label} · {location}"):
-        # The accent chip carries the [n] marker; the rest of the metadata row is a
-        # monospace figure so page numbers and document ids line up across cards.
         _emit_html(
             f'<div class="{_CLASS_PANEL}">'
             f'<span class="{_CLASS_CHIP} {_CLASS_CHIP_ACCENT}">[{ref_index}]</span>'
@@ -390,30 +215,12 @@ def render_citation_card(citation: object, *, doc_names: Mapping[str, str] | Non
 
 
 def render_pending_answer(label: str = PENDING_COPY) -> None:
-    """Draw the assistant bubble the real answer replaces once the graph returns.
-
-    Args:
-        label: The status text shown while the answer is being produced.
-    """
 
     with st.chat_message(name="assistant"), st.spinner(label):
         st.caption("Retrieving, then synthesising, then verifying against sources.")
 
 
 def render_answer_error(message: str, *, details: str | None = None, retry: bool = False) -> bool:
-    """Render a failed turn: the error banner plus an optional retry action.
-
-    The rule this exists to keep (ADR-007): a failed turn is never an empty answer —
-    the user is told what failed and offered the question again.
-
-    Args:
-        message: One-line, user-readable description of the failure.
-        details: The typed error's class name and message, when the caller has one.
-        retry: When ``True``, a labeled retry button is rendered.
-
-    Returns:
-        ``True`` exactly once, on the rerun in which the retry button was clicked.
-    """
 
     st.error(message)
     if details:
@@ -424,13 +231,6 @@ def render_answer_error(message: str, *, details: str | None = None, retry: bool
 
 
 def _emit_html(markup: str) -> None:
-    """Write one raw HTML fragment, sanitized by ``st.html`` (DOMPurify).
-
-    ``st.html`` is the only primitive that controls the DOM — ``st.markdown(``,
-    ``unsafe_allow_html=True``) would re-parse the fragment as markdown — so every
-    document-derived value this module interpolates is passed through
-    :func:`_escape` first.
-    """
 
     st.html(markup)
 
@@ -446,30 +246,11 @@ def render_composer(
     disabled: bool = False,
     max_chars: int | None = _COMPOSER_MAX_CHARS,
 ) -> str | None:
-    """Render the docked composer and return the question the user submitted.
-
-    The returned value is non-``None`` for exactly one rerun — the one triggered by
-    the submit — which is what makes "invoke the graph once per question" a matter of
-    the caller reading the return value instead of counting widget state.
-
-    Args:
-        key: Widget key. Distinct keys keep two composers on one page independent.
-        placeholder: The greyed prompt inside the box.
-        disabled: Grey the box while an answer is in flight, so a second submit cannot
-            interleave with the first.
-        max_chars: Upper bound on the question length, or ``None`` for no bound.
-
-    Returns:
-        The submitted question with surrounding whitespace stripped, or ``None``.
-    """
 
     submitted = st.chat_input(placeholder, key=key, disabled=disabled, max_chars=max_chars)
     if submitted is None:
         return None
     return str(submitted).strip()
-
-
-# --- answer rendering --------------------------------------------------------------
 
 
 def _render_answer_view(
@@ -478,20 +259,12 @@ def _render_answer_view(
     doc_names: Mapping[str, str] | None,
     role_key: str | None = None,
 ) -> None:
-    """Render the answer body, its markers, and its citation cards.
-
-    A refusal renders its copy and its reason marker but no "ungrounded" line: a
-    refusal is a correct outcome (``grounded=True`` on that path by contract), so
-    warning about it would be false.
-    """
 
     with st.chat_message(name="assistant"):
         with st.container(border=False, key=_keyed(_ANSWER_KEY, role_key)):
             if view.answer_md.strip():
                 st.markdown(view.answer_md)
             elif not view.refusal_reason:
-                # The contract forbids an empty answer, so reaching here means a stored
-                # row lost its body; showing the gap beats rendering silence.
                 theme_caption_note("This turn recorded no answer text.")
         _render_markers(view)
         for citation in view.citations:
@@ -499,15 +272,6 @@ def _render_answer_view(
 
 
 def _render_markers(view: _AnswerView) -> None:
-    """Render the grounding badge/caption block under an answer.
-
-    A degraded-planner refusal renders the "planner degraded" badge and its sentence
-    *in place of* the Refusal badge's reason line, not in addition to a healthy-looking
-    one: the reason would name a coverage gap the planner never judged. The
-    ``grounded`` badge above it is suppressed on that path too, because a degraded run
-    never reached verification, so neither "grounded" nor "ungrounded" is a claim about
-    this turn.
-    """
 
     if view.planner_degraded is True:
         theme_badge(PLANNER_DEGRADED_LABEL, kind="error")
@@ -524,16 +288,6 @@ def _render_markers(view: _AnswerView) -> None:
 
 
 def _keyed(role_key: str, suffix: str | None) -> str:
-    """One unique widget key per rendered turn, rooted at the theme's role key.
-
-    The theme's selectors match the frontend-derived ``st-key-<key>`` class, so the
-    prefix must stay ``isip-answer`` / ``isip-question`` exactly. The suffix exists
-    because Streamlit rejects a duplicate widget key on one page — three answers on
-    the transcript would die on the third — and it is *generated* rather than trusted
-    to the caller, so the failure cannot reach the app from a caller that forgets.
-    A per-render counter in ``st.session_state`` keeps the keys distinct for one
-    script run, which is the lifetime Streamlit itself gives them.
-    """
 
     if suffix is None:
         counter = int(st.session_state.get(_KEY_COUNTER_KEY, 0))
@@ -549,15 +303,6 @@ def _turn_key(turn: object) -> str | None:
 
 @contextmanager
 def _question_container(role_key: str | None = None) -> Iterator[st.delta_generator.DeltaGenerator]:
-    """The user bubble: ``st.chat_message`` carrying the question role class.
-
-    The theme's ``isip-question`` rule dims the question's own markdown and drops the
-    accent rule, which is what makes the answer's orange edge the loudest mark on the
-    canvas. ``st.chat_message`` takes no ``key`` (verified: it is not in its
-    signature), so the class hook is a keyed ``st.container`` inside the bubble — the
-    frontend derives ``st-key-<key>`` and renders the container's children inside
-    that element, which a stray open/close ``st.html`` pair cannot do.
-    """
 
     with (
         st.chat_message(name="user"),
@@ -566,15 +311,7 @@ def _question_container(role_key: str | None = None) -> Iterator[st.delta_genera
         yield st._main
 
 
-# --- transcript plumbing ------------------------------------------------------------
-
-
 def _answers_by_turn_id(messages: Sequence[object]) -> dict[int, object]:
-    """Index stored answers by the turn id they belong to.
-
-    ``Message.turn`` is the authoritative link; anything without a turn is dropped
-    here because it cannot be placed in the transcript.
-    """
 
     indexed: dict[int, object] = {}
     for message in messages:
@@ -598,19 +335,9 @@ def _turn_id(turn: object) -> int | None:
     return turn_id if isinstance(turn_id, int) else None
 
 
-# --- citation plumbing --------------------------------------------------------------
-
-
 def _citation_fields(
     citation: object,
 ) -> tuple[int, str, int | None, tuple[str, ...], str]:
-    """Read the five renderable citation fields off either citation class.
-
-    Both citation classes agree on the field names, so this is a get-and-coerce rather
-    than a converter: a field that is absent or wrongly typed degrades to the neutral
-    value (``0``, ``""``, ``None``) that renders as "not recorded" rather than raising
-    on one malformed row.
-    """
 
     raw_index = getattr(citation, "ref_index", None)
     ref_index = raw_index if isinstance(raw_index, int) else 0
@@ -624,12 +351,6 @@ def _citation_fields(
 
 
 def _short_doc_label(doc_id: str) -> str:
-    """A citation's document label when no display name is available.
-
-    ``doc_id`` is the sha256 of the uploaded file — stable and unique, but not something
-    a reader can scan — so a long one is shown truncated and the full id stays on the
-    card's footer line.
-    """
 
     if len(doc_id) <= 12:
         return doc_id or "unknown document"
