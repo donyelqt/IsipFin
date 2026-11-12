@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""Floor guard. Enforces the floor in docs/CONSTRAINTS.md.
-
-Modes:
-  --diff        scan only lines added relative to the branch point (task end)
-  --repo-wide   scan every tracked source file (CI)
-
-Exit codes:
-  0  clean
-  1  violation found
-  2  usage / git error
-
-Scope by design: src/, tests/, scripts/, app.py. Markdown (docs/, prompts/,
-README.md) is never scanned — those may contain the deliberate "TODO during
-build" markers defined in docs/prompts/README.md.
-
-This file is excluded from its own scan: the RULES table below must contain the
-very literals it forbids, or it would flag itself on every run.
-"""
-
 from __future__ import annotations
 
 import re
@@ -29,7 +9,6 @@ SELF = Path(__file__).resolve()
 SCAN_PATHS = ("src", "tests", "scripts", "app.py")
 SCAN_SUFFIXES = {".py"}
 
-# Pattern -> human-readable rule. Ordered: suppressions and stubs first.
 RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"#\s*noqa"), "lint suppression"),
     (re.compile(r"#\s*type:\s*ignore"), "type suppression"),
@@ -47,7 +26,6 @@ def git(args: list[str]) -> str:
 
 
 def repo_files() -> list[Path]:
-    """Every tracked .py file under the scan roots (present or not-yet-created)."""
     files: list[Path] = []
     for root in SCAN_PATHS:
         p = Path(root)
@@ -71,7 +49,7 @@ def diff_files() -> list[Path]:
     except subprocess.CalledProcessError:
         base = "HEAD~1"
     names = git(["diff", "--name-only", base, "HEAD"]).split()
-    plus = git(["diff", "--name-only"]).split()  # uncommitted, task-end usage
+    plus = git(["diff", "--name-only"]).split()
     out = {Path(n) for n in names + plus}
     return [p for p in sorted(out) if p.suffix in SCAN_SUFFIXES and p.resolve() != SELF]
 
@@ -96,7 +74,6 @@ def scan(files: list[Path], only_added: bool) -> list[tuple[Path, int, str, str]
             if stripped.startswith("#") and not any(
                 p.search(line) for p, _ in RULES if "suppression" in _
             ):
-                # Allow documentation of the rules themselves in comments.
                 continue
             for pattern, rule in RULES:
                 if pattern.search(line):
