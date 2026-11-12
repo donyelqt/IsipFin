@@ -1,73 +1,3 @@
-"""IsipFin design system: token definitions, stylesheet injection, render helpers.
-
-This module is the single owner of the app's visual language (ADR-009 keeps the UI
-Streamlit-native, so the language is delivered as one injected ``<style>`` block
-rather than a build step or a component library). Everything downstream —
-``src/components/chat.py``, ``src/components/sidebar.py``,
-``src/components/upload.py`` — imports from here so the palette, the radius rule
-and the type stack are defined exactly once.
-
-What this module exports
-------------------------
-
-Injection
-    :func:`inject_theme` — emit the whole stylesheet, on *every* run. It must
-    never be memoised: Streamlit removes any element a rerun does not re-send, so
-    a stylesheet emitted only once is destroyed by the user's first click and the
-    app reverts to bare Streamlit chrome (measured in a real browser — see
-    :func:`inject_theme`). ``st.html`` sends style-only content to the *event*
-    container, so the call costs no vertical space, but ``st.html`` also drops
-    the ``<style>`` element itself, which is why the block goes through
-    ``st.markdown(..., unsafe_allow_html=True)``.
-
-Tokens
-    :data:`BG`, :data:`SURFACE`, :data:`SURFACE_2`, :data:`BORDER`,
-    :data:`BORDER_STRONG`, :data:`TEXT`, :data:`TEXT_MUTED`, :data:`TEXT_DIM`,
-    :data:`ACCENT`, :data:`ACCENT_STRONG`, :data:`ACCENT_DIM`,
-    :data:`ACCENT_SOFT`, :data:`SUCCESS`, :data:`WARNING`, :data:`ERROR`,
-    :data:`RADIUS`, :data:`RADIUS_LG`, :data:`RADIUS_SMALL`, :data:`FONT_SANS`,
-    :data:`FONT_MONO`, plus :data:`TOKENS` (the name → value mapping the CSS
-    block is rendered from).
-
-Render helpers
-    :func:`panel`, :func:`label`, :func:`figure`, :func:`badge`,
-    :func:`caption_note`, :func:`spacer` — small, side-effect-light HTML emitters
-    that share the token values and the radius rule. They are conveniences, not a
-    gateway: a component that prefers to write its own markup may import the
-    class names (:data:`CSS_CLASSES`) or the tokens directly instead.
-
-Layout helpers
-    :func:`rail_brand`, :func:`rail_label`, :func:`rail_status_card` describe the
-    rail's three fixed rows (brand mark, section label, workspace card);
-    :func:`hero_mark`, :func:`hero_title`, :func:`hero_sub`, :func:`eyebrow`,
-    :func:`footer_note` describe the canvas's centred empty state and its footer
-    line. They are the same kind of emitter as the render helpers — one HTML
-    fragment each, escaped and classified — but they carry the *placement*
-    (centred, upper-case, muted) that would otherwise be re-invented per caller.
-
-The rules the stylesheet enforces
----------------------------------
-1. **One radius scale.** ``--isip-radius`` (10px) for panels, cards and the primary
-   CTA, ``--isip-radius-lg`` (16px) for the composer dock and the brand marks, and
-   ``--isip-radius-small`` (8px) for inputs and inline chips. No other size exists,
-   on purpose.
-2. **Two type roles.** IBM Plex Sans for prose, IBM Plex Mono for every figure,
-   table, id and code-ish string — so a reader can tell a number from a word at a
-   glance. ``--isip-font-sans`` carries a system fallback stack, so the app still
-   renders (and still passes contrast) when Google Fonts is unreachable.
-3. **No structural emoji.** Status is carried by :func:`badge` labels and the
-   color tokens; the iconless markup keeps the UI accessible and grep-clean.
-4. **Reserved widget-key prefixes.** Five prefixes are styled by selector, so
-   any *other* widget keyed with one of them silently inherits that styling:
-   ``isip-answer…`` / ``isip-question…`` (the chat pane's role containers, and
-   the only two that add a border), ``isip-nav…`` (the rail's nav buttons),
-   ``isip-suggestion…`` (the hero's demo chips) and ``isip-session…`` (the
-   conversation rows). The owning component's module constant is the definition;
-   every other component must pick a new prefix rather than borrowing one.
-5. **Zero business logic.** This module renders tokens and containers. It never
-   reads the store, prompts, retrieval or the LLM gateway (ADR-009's boundary).
-"""
-
 from __future__ import annotations
 
 import html
@@ -118,69 +48,40 @@ __all__ = [
 ]
 
 
-# --- the palette (black + orange premium financial dark theme) ------------------
-
-#: Near-black base, deliberately not ``#000``: layered surfaces need a floor they
-#: can separate from, and pure black collapses ``--isip-surface`` against it.
 BG = "#0A0A0B"
-#: Panels and cards.
 SURFACE = "#131316"
-#: Raised rows inside a panel (a citation snippet inside a citation card).
 SURFACE_2 = "#1B1B20"
-#: Hairlines. ``--isip-border-strong`` is for focused controls and the CTA.
 BORDER = "#2A2A31"
 BORDER_STRONG = "#3A3A44"
 
 TEXT = "#F5F5F6"
-#: Secondary prose (labels, metadata). Contrast on ``BG`` ≈ 6.6:1.
 TEXT_MUTED = "#9A9AA3"
-#: Tertiary text (timestamps, ids). Contrast on ``SURFACE`` ≈ 3.4:1 — large
-#: text and non-essential only, never a figure a user must read.
 TEXT_DIM = "#6C6C76"
 
-#: The accent. Orange is the only saturated hue in the system, which is what
-#: makes it read as "the action" without a second accent competing for it.
 ACCENT = "#FF7A1A"
 ACCENT_STRONG = "#FF9347"
-#: Tinted wash for selected rows / hovered list items / the citation marker chip.
 ACCENT_DIM = "rgba(255,122,26,0.14)"
-#: The faintest accent wash: a focus ring / halo behind a control, where
-#: ``ACCENT_DIM`` would read as a *selected* state rather than an indication.
 ACCENT_SOFT = "rgba(255,122,26,0.10)"
 
-#: Status colors. Kept to the three the UI actually states (ok / warn / error);
-#: nothing else is allowed to use them.
 SUCCESS = "#3FB950"
 WARNING = "#D29922"
 ERROR = "#F85149"
 
-#: The one radius scale. Radii is the *only* place a new size would show up.
 RADIUS = "10px"
-#: The large radius: the composer dock and the brand marks, the two places the
-#: design is deliberately softer than a card so they read as *the* focal point.
 RADIUS_LG = "16px"
 RADIUS_SMALL = "8px"
 
-#: Prose font. The ``-apple-system``/``Segoe UI`` front of the stack means the
-#: Windows dev box and the Linux container both get a native sans before the
-#: webfont arrives; IBM Plex Sans is the named intent either way.
 FONT_SANS = (
     '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", '
     'Roboto, "Helvetica Neue", Arial, sans-serif'
 )
-#: Figures, tables, ids. Same reasoning: the fallbacks are the platform's real
-#: monospace stacks, so columns of numbers stay aligned offline.
 FONT_MONO = (
     '"IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, '
     '"Liberation Mono", monospace'
 )
 
-#: The Google Fonts request. Two families, one import, one place to change it.
-#: A ``display=swap`` keeps text visible while the webfont loads.
 FONT_IMPORT_URL = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
 
-#: CSS custom-property name → value. The stylesheet is rendered from this one
-#: mapping, so the Python constants and the CSS block can never drift.
 TOKENS: dict[str, str] = {
     "--isip-bg": BG,
     "--isip-surface": SURFACE,
@@ -204,8 +105,6 @@ TOKENS: dict[str, str] = {
     "--isip-font-mono": FONT_MONO,
 }
 
-#: Class names the injected stylesheet defines, exported so a sibling component
-#: can emit its own markup against the same rules instead of re-declaring them.
 CSS_CLASSES = (
     "isip-panel",
     "isip-panel-2",
@@ -245,16 +144,11 @@ CSS_CLASSES = (
 )
 
 
-# --- the stylesheet ------------------------------------------------------------
-
-
 def _token_block() -> str:
     lines = [f"    {name}: {value};" for name, value in TOKENS.items()]
     return ":root {\n" + "\n".join(lines) + "\n}"
 
 
-#: Everything after the tokens. Written as a module constant rather than an
-#: f-string so the braces in CSS stay literal and readable.
 _STYLESHEET_BODY = """
 /* --- base --------------------------------------------------------------- */
 
@@ -1099,58 +993,15 @@ button.stBaseButton-secondary:hover,
 """
 
 
-# --- injection -----------------------------------------------------------------
-
-
 def inject_theme() -> None:
-    """Emit the design-system stylesheet (tokens + rules) into the current run.
-
-    Called by ``app.py`` on every run, before any component renders, and that
-    *every run* is the whole point: Streamlit removes every element a rerun does
-    not re-send, so a once-per-session guard does not save a duplicate — it
-    deletes the stylesheet. Measured in a real browser on a first load: exactly
-    one ``<style>`` node carrying this block, ``--isip-accent`` live, the rail
-    label upper-cased; after a single unrelated button click, zero such nodes,
-    every custom property gone, and the app back on Streamlit's own chrome. The
-    first click a user makes therefore used to strip the design system. Emitting
-    unconditionally costs one re-sent element per run and keeps the CSS in place.
-
-    Injection goes through ``st.markdown(..., unsafe_allow_html=True)`` rather
-    than ``st.html``, and that is measured, not stylistic: verified in a real
-    browser, ``st.html`` renders its container but drops the ``<style>`` element,
-    so the whole design system silently did not apply (the app still *looked*
-    dark only because Streamlit's own default theme is dark). ``st.html`` is
-    still correct for the helper markup below, which does land.
-
-    The base palette is ALSO set natively in ``.streamlit/config.toml``. That is
-    not redundant: Streamlit paints its own widgets (sliders, inputs, the canvas)
-    from its theme tokens, so CSS alone leaves them on the default red accent
-    while our surfaces are orange.
-
-    The fonts arrive as a single ``@import`` inside the same block. That is the
-    documented Streamlit way (there is no build step, and a ``<link>`` to a
-    local file would be an unread path in the container); the cost is that the
-    request serializes behind the stylesheet, which is acceptable at two
-    families and is why the fallback stacks exist.
-    """
     block = f"<style>\n{_FONT_IMPORT_CSS}\n{_token_block()}\n{_STYLESHEET_BODY}\n</style>"
     st.markdown(block, unsafe_allow_html=True)
 
 
-#: ``@import`` must be the first rule in a stylesheet, ahead of ``:root``.
 _FONT_IMPORT_CSS = f'@import url("{FONT_IMPORT_URL}");'
 
 
-# --- HTML primitives -----------------------------------------------------------
-
-
 def _escape(text: object | None) -> str:
-    """Escape ``text`` for HTML, rendering ``None`` as the empty string.
-
-    Every caller passes text that may legitimately be absent (an optional
-    prefix or suffix, an unknown parameter), and ``str(None)`` would leak the
-    literal "None" into the UI — the classic Streamlit-rendered-null bug.
-    """
     if text is None:
         return ""
     return html.escape(str(text), quote=True)
@@ -1161,13 +1012,6 @@ def _class_list(*names: str | None) -> str:
 
 
 def _emit(markup: str, *, help_text: str | None = None) -> None:
-    """Write one raw HTML fragment.
-
-    ``st.html`` is the only Streamlit primitive that lets us control the DOM
-    (``st.markdown(..., unsafe_allow_html=True)`` would re-parse it as markdown),
-    and it sanitizes with DOMPurify — which is why every caller passes escaped
-    text and never unsanitized document content.
-    """
     st.html(markup)
     if help_text:
         st.caption(help_text)
@@ -1181,36 +1025,6 @@ def panel(
     extra_classes: str | None = None,
     key: str | None = None,
 ) -> Iterator[st.delta_generator.DeltaGenerator]:
-    """A bordered card around a group of widgets, as a ``with`` block.
-
-    Renders ``st.container(border=False)`` and puts a zero-height marker
-    ``<div>`` inside it carrying the ``isip-panel`` class, so the card's
-    background, border and radius come from the injected stylesheet rather than
-    Streamlit's own container skin (which is tuned for the light theme). The
-    marker div is what makes this work: ``st.container`` emits no element of its
-    own that we can attribute, so the card's box is drawn on an element we own
-    and the widgets stream in beside it.
-
-    Parameters
-    ----------
-    title:
-        Optional section heading, rendered as the monospace uppercase
-        :func:`label` above the container's contents.
-    kind:
-        Optional panel modifier. ``"raised"`` lifts the surface to
-        ``--isip-surface-2``; any other value is ignored.
-    extra_classes:
-        Extra CSS classes appended to ``isip-panel``. ``"isip-flush"`` is the
-        convention for the sidebar's brand and footer rows, which must not draw
-        a second card inside the rail's own surface.
-    key:
-        A widget key for the underlying container, passed straight through to
-        ``st.container``. Uniqueness is the caller's job, as usual.
-
-    Yields
-    ------
-    The container delta generator, to render widgets into.
-    """
     classes = _class_list("isip-panel", "isip-panel-2" if kind == "raised" else None, extra_classes)
     container = st.container(border=False, key=key)
     if title:
@@ -1232,23 +1046,6 @@ def figure(
     prefix: str | None = None,
     suffix: str | None = None,
 ) -> None:
-    """Render a figure (number, id, page, score) in the monospace stack.
-
-    Every numeric surface in the UI goes through here so ``tabular-nums``
-    applies and the reader can tell figures from prose at a glance.
-
-    Parameters
-    ----------
-    value:
-        The value to render. Escaped, so a filename or an id is safe to pass
-        straight through.
-    muted:
-        Use the muted text color (for secondary figures beside a primary one).
-    large:
-        The larger figure size, for a headline number such as a revenue total.
-    prefix, suffix:
-        Optional text placed before / after the value, same styling.
-    """
     classes = _class_list(
         "isip-figure",
         "isip-figure-muted" if muted else None,
@@ -1259,20 +1056,6 @@ def figure(
 
 
 def badge(text: str, *, kind: str = "neutral", extra_classes: str | None = None) -> None:
-    """Render a status pill: the only status icon the UI uses.
-
-    Parameters
-    ----------
-    text:
-        The status word (``indexed``, ``missing``, ``retry``). Rendered
-        uppercase by CSS; no emoji is ever added here.
-    kind:
-        One of ``success``, ``warn``, ``error``, ``accent`` or ``neutral``
-        (default). Unknown values fall back to ``neutral`` rather than raising,
-        so a new status string cannot break the render path.
-    extra_classes:
-        Extra CSS classes appended to the badge.
-    """
     modifier = f"isip-badge-{kind}"
     if modifier not in CSS_CLASSES:
         modifier = "isip-badge-neutral"
@@ -1285,31 +1068,11 @@ def caption_note(text: str) -> None:
 
 
 def spacer(size: str | None = None) -> None:
-    """Insert one fixed-height gap in the vertical rhythm.
-
-    Parameters
-    ----------
-    size:
-        Any CSS length (``0.75rem``). Defaults to ``0.75rem``, the stylesheet's
-        own ``--isip-spacer-size``.
-    """
     style = f' style="--isip-spacer-size: {_escape(size)}"' if size else ""
     _emit(f'<div class="{_class_list("isip-spacer")}"{style}></div>')
 
 
-# --- layout helpers: the rail's rows -------------------------------------------
-
-
 def rail_brand(name: str, subtitle: str | None = None) -> None:
-    """Render the rail's brand row: the mark, then the wordmark stack.
-
-    Parameters
-    ----------
-    name:
-        The wordmark (``IsipFin``).
-    subtitle:
-        Optional second line under the wordmark, in the dim text colour.
-    """
     names = (
         f'<span class="{_class_list("isip-rail-names")}">'
         f'<span class="{_class_list("isip-rail-wordmark")}">{_escape(name)}</span>'
@@ -1326,20 +1089,9 @@ def rail_brand(name: str, subtitle: str | None = None) -> None:
 
 
 def rail_label(text: str) -> None:
-    """Render the rail's upper-case muted section label (``PREVIOUS CONVERSATIONS``).
-
-    Sibling of :func:`label` rather than a call to it: the label lives in the
-    rail, which is the app's densest column, so it sits one size smaller and
-    owns its own margin.
-    """
     _emit(f'<div class="{_class_list("isip-rail-label")}">{_escape(text)}</div>')
 
 
-#: How a rail status word maps onto a badge kind. The card takes one free-form
-#: ``badge`` string — the sidebar states ``READY`` or ``NO INDEX`` and nothing
-#: else — so the mapping lives here instead of in the signature. An unlisted
-#: word renders the neutral pill rather than raising, for the same reason
-#: :func:`badge` falls back: a new status string must not break the rail.
 _STATUS_BADGE_KINDS: dict[str, str] = {
     "READY": "success",
     "INDEXED": "success",
@@ -1350,19 +1102,6 @@ _STATUS_BADGE_KINDS: dict[str, str] = {
 
 
 def rail_status_card(title: str, lines: Sequence[str], badge: str | None = None) -> None:
-    """Render the rail's bottom identity/status card.
-
-    Parameters
-    ----------
-    title:
-        The card's heading (``Local workspace``).
-    lines:
-        The facts to state, one muted line each. Blank entries are skipped, so a
-        caller can assemble the list conditionally without filtering it.
-    badge:
-        Optional status word for the head row (``READY``). Mapped onto a badge
-        kind by :data:`_STATUS_BADGE_KINDS`; an unlisted word renders neutral.
-    """
     head = f'<span class="{_class_list("isip-rail-card-title")}">{_escape(title)}</span>'
     if badge:
         kind = _STATUS_BADGE_KINDS.get(badge.strip().upper(), "neutral")
@@ -1383,9 +1122,6 @@ def rail_status_card(title: str, lines: Sequence[str], badge: str | None = None)
     )
 
 
-# --- layout helpers: the hero and its footer -----------------------------------
-
-
 def hero_mark() -> None:
     _emit(
         f'<div class="{_class_list("isip-hero")}">'
@@ -1395,18 +1131,6 @@ def hero_mark() -> None:
 
 
 def hero_title(plain: str, accent: str | None = None) -> None:
-    """Render the hero's centered headline, optionally two-toned.
-
-    Parameters
-    ----------
-    plain:
-        The whole title text.
-    accent:
-        A substring of ``plain`` to render in the accent colour. When it does not
-        occur in ``plain`` (or is ``None``) the whole title renders in the text
-        colour — a caller with a stale word gets a plain title, not a broken one,
-        and the markup stays one coherent fragment either way.
-    """
     body = _escape(plain)
     if accent and accent in plain:
         before, _, after = plain.partition(accent)
