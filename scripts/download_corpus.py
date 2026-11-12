@@ -1,36 +1,3 @@
-#!/usr/bin/env python3
-"""Fetch the FY2023 corpus document into ``data/pdfs/`` (task T5).
-
-There is no default source. Microsoft's own "Microsoft 2023 Annual Report" artifact
-(linked from https://www.microsoft.com/investor/reports/ar23/download-center/) is the
-canonical document, but that endpoint currently serves a **DOCX** — a ZIP whose first
-bytes are ``PK\\x03\\x04`` — not a PDF, so no URL is assumed. Pass ``--url`` to install
-from a PDF source, or ``--check`` to probe a candidate first.
-
-Idempotency contract
---------------------
-A second run is a no-op. The digest of every installed file is recorded in
-``data/pdfs/manifest.json``; when the file on disk matches its recorded digest the
-script performs no HTTP request, writes nothing, and reports "already present". A file
-placed by hand is adopted rather than re-downloaded, and its digest is recorded so the
-next run can be a no-op. ``--force`` re-downloads regardless.
-
-Installs are atomic: the response is streamed into a temp file *in the destination
-directory* and only renamed into place after the magic-byte check passes, so an
-interrupted run can never leave a truncated ``.pdf`` behind.
-
-Hard guarantee: a non-PDF response is never written as a ``.pdf``. The first bytes of
-the response are checked against ``%PDF`` before the rename, and a rejection names the
-bytes actually received ("expected ``%PDF``, got ``PK``") together with the declared
-``Content-Type``.
-
-Exit codes
-----------
-0  the document is installed, or was already present
-1  usage error, or the download / validation failed
-2  ``--check``: the source answered but is not a PDF
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -46,13 +13,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-# Official artifact linked from Microsoft's ar23 download center. NOTE: this endpoint
-# currently serves a DOCX (ZIP, b"PK\x03\x04"), not a PDF, so it is offered as an
-# opt-in --url argument only and is never the default. Override with --url.
 CORPUS_URL = "https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/2023_Annual_Report"
 
-# Leading bytes every PDF must carry. A server that labels its response
-# "application/pdf" is still never trusted over the bytes themselves.
 PDF_MAGIC = b"%PDF"
 
 MANIFEST_FILENAME = "manifest.json"
@@ -66,7 +28,6 @@ USER_AGENT = "isipfin-corpus-downloader/1.0"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PDF_DIR = REPO_ROOT / "data" / "pdfs"
 
-# Leading bytes -> human-readable type. Order matters: the first match wins.
 _SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"%PDF-", "PDF document"),
     (b"PK\x03\x04", "ZIP container (DOCX / XLSX / PPTX / EPUB)"),
@@ -84,7 +45,7 @@ _SIGNATURES: tuple[tuple[bytes, str], ...] = (
 
 
 class DownloadError(Exception):
-    """Raised when a source cannot be fetched, or the response is not a PDF."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -123,9 +84,6 @@ class Source:
         )
 
 
-# --- helpers ---------------------------------------------------------------------
-
-
 def fmt_size(size_bytes: int) -> str:
     value = float(size_bytes)
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -156,7 +114,6 @@ def sniff_kind(prefix: bytes) -> str:
 
 
 def sha256_of(path: Path) -> str:
-    """SHA-256 of a file's bytes, read in chunks so large documents stay cheap."""
     hasher = hashlib.sha256()
     with open(path, "rb") as handle:
         while True:
@@ -173,11 +130,6 @@ def read_prefix(path: Path, count: int = SNIFF_BYTES) -> bytes:
 
 
 def filename_from_url(url: str) -> str:
-    """Stable destination filename derived from a URL: its last path segment.
-
-    The result is identical for identical URLs, contains no query or fragment, carries a
-    ``.pdf`` suffix, and has a bounded, filesystem-safe length.
-    """
     from urllib.parse import unquote, urlparse
 
     parsed = urlparse(url)
@@ -193,9 +145,6 @@ def filename_from_url(url: str) -> str:
 
 def utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# --- manifest --------------------------------------------------------------------
 
 
 def manifest_path(directory: Path) -> Path:
@@ -217,7 +166,6 @@ def read_manifest(directory: Path) -> dict[str, Source]:
 
 
 def write_manifest(directory: Path, sources: dict[str, Source]) -> None:
-    """Write the manifest atomically, so an interrupted run cannot truncate it."""
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": MANIFEST_VERSION,
@@ -229,11 +177,7 @@ def write_manifest(directory: Path, sources: dict[str, Source]) -> None:
     os.replace(temporary, target)
 
 
-# --- transport -------------------------------------------------------------------
-
-
 def fetch(url: str, target: Path, timeout: float) -> Fetched:
-    """Stream ``url`` into ``target``; the caller decides whether to keep the file."""
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/pdf, */*"})
     hasher = hashlib.sha256()
     size = 0
@@ -269,9 +213,6 @@ def require_pdf(fetched: Fetched, url: str) -> bytes:
     )
 
 
-# --- install / check -------------------------------------------------------------
-
-
 def check_source(url: str, timeout: float) -> int:
     print(f"checking {url}")
     with tempfile.TemporaryDirectory(prefix="isipfin-corpus-check-") as scratch:
@@ -282,7 +223,7 @@ def check_source(url: str, timeout: float) -> int:
         except DownloadError as exc:
             print(f"check failed: {exc}", file=sys.stderr)
             return 1
-        if not prefix.startswith(PDF_MAGIC):  # unreachable: require_pdf already raised
+        if not prefix.startswith(PDF_MAGIC):
             return 2
         print(f"  type          {sniff_kind(prefix)}")
         print(f"  size          {fmt_size(fetched.size_bytes)} ({fetched.size_bytes} bytes)")
@@ -311,8 +252,6 @@ def install_source(url: str, directory: Path, filename: str, timeout: float, for
         if force and recorded is not None and recorded.sha256 == digest:
             print(f"forcing a fresh download of {url}")
         elif recorded is None:
-            # A file placed by hand: adopt it instead of re-downloading, and record its
-            # digest so every later run is a no-op without guessing at the source.
             size = destination.stat().st_size
             sources[destination.name] = Source(
                 filename=destination.name,
@@ -361,9 +300,6 @@ def install_source(url: str, directory: Path, filename: str, timeout: float, for
     print(f"  {fmt_size(fetched.size_bytes)} ({fetched.size_bytes} bytes), sha256 {fetched.sha256}")
     print(f"  content-type {fetched.content_type or 'none'}")
     return 0
-
-
-# --- entrypoint ------------------------------------------------------------------
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -418,8 +354,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as exc:
         if exc.code != 2 or "--url" in arguments:
             raise
-        # A bare invocation: argparse rejected the missing required --url. Add the one
-        # fact that decides what the user does next — the official source is a DOCX.
         print(
             "error: no source URL given (--url is required; there is deliberately no default)",
             file=sys.stderr,
