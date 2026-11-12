@@ -1,10 +1,3 @@
-"""The 6-step demo script from docs/STRESS-TEST-DELIVERY.md, run under MOCK_LLM=1.
-
-Steps 1-2 (compose + upload) are infrastructure; the ingest path is exercised here by
-loading the real persisted index as the node sees it. Steps 3-6 are the substance and are
-run end to end through the compiled graph, with each node's plain-language report.
-"""
-
 from __future__ import annotations
 
 import json
@@ -74,9 +67,6 @@ def run_step(number: int, question: str, docs: list[DocSummary]) -> None:
     print(f"      route_after_analyze -> {route!r}")
     print(f"      route_after_analyze path_map = {ANALYZE_ROUTES.get(route)!r}")
 
-    # ``route_after_analyze`` returns the *plan token* (``simple`` / ``multi_part`` /
-    # ``out_of_scope``); ``ANALYZE_ROUTES`` maps the token to the node name. Comparing
-    # against the token keeps the runner's branch identical to the graph's own routing.
     if route == "out_of_scope":
         print("      (routed to refuse — retrieval never runs)\n")
         return
@@ -105,7 +95,6 @@ def run_step(number: int, question: str, docs: list[DocSummary]) -> None:
         )
     print(f"        note              = {update['retrieval_note']}")
 
-    # The router reads the state AFTER the node's update — the loop bound in action.
     gate = route_after_retrieve(state)
     print(f"        route_after_retrieve -> {gate!r} => {RETRIEVE_ROUTES.get(gate, gate)!r}")
     print()
