@@ -1,26 +1,3 @@
-"""chunking-index invariants (ADR-002, docs/TESTING-AND-EVAL.md, STRESS-TEST-RAG rows 4-5).
-
-Asserts the parent/child contract implemented by `src/core/chunking.py`:
-
-- **Linkage:** every child chunk resolves to a parent chunk, and every parent has
-  children; parents are section-aligned (a new `section_path` starts a new parent,
-  consecutive same-section blocks merge).
-- **Tables are atomic:** a table block is never cut inside a parent — the parent
-  that carries any of its rows carries all of them, header row first. A table over
-  the ~1200-token threshold is split only at row boundaries, with the header row
-  repeated into every continuation (STRESS-TEST-RAG row 4).
-- **Page ranges:** `page_end >= page_start`, no block's page is lost, and merged
-  same-section blocks keep the full range even across pages (row 5).
-- **Determinism:** ids are derived from `doc_id` plus a 0-based index, never random,
-  so the same `ParsedDocument` yields byte-identical output.
-- **Degenerate input:** empty documents and whitespace-only blocks produce no
-  chunks instead of raising.
-
-Token counts use the offline estimate `max(1, len(text) // 4)`; tiktoken is never
-imported because its BPE vocabulary is fetched at runtime, which would break the
-hermetic (no-network) test contract.
-"""
-
 from __future__ import annotations
 
 import difflib
@@ -38,10 +15,8 @@ from src.core.pdf_parser import Block, ParsedDocument, parse_pdf, table_to_markd
 
 from tests.fixtures import sample_doc
 
-# --- chunking parameters (ADR-002 parameter table) ------------------------------
 CHILD_SIZE_TOKENS = 250
 CHILD_OVERLAP_TOKENS = 50
-# Slack absorbs the separator a child inherits at its boundary; the target stands.
 CHILD_SIZE_SLACK_TOKENS = 50
 TABLE_SPLIT_THRESHOLD_TOKENS = 1200
 
@@ -51,10 +26,8 @@ DATA_ROWS = [
     ["Operating income", "$ 88,523", "$ 83,383"],
 ]
 
-# The markdown the parser emits for the fixture table (ADR-004 rule 5: header travels).
 SMALL_TABLE = table_to_markdown([HEADER_ROW, *DATA_ROWS])
 
-# sha256-shaped; only the first 12 characters enter the id scheme.
 DOC_ID = "0123456789abcdef" * 4
 
 SECTION_AR = ("ANNUAL REPORT",)
@@ -63,7 +36,6 @@ SECTION_CONTINGENCIES = (*SECTION_AR, "CONTINGENCIES")
 
 
 def _est_tokens(text: str) -> int:
-    """The offline token estimate the chunker must use (never tiktoken)."""
     return max(1, len(text) // 4)
 
 
@@ -77,7 +49,6 @@ def _doc(*blocks: Block) -> ParsedDocument:
 
 
 def _big_table(n_rows: int = 200) -> str:
-    """A markdown table well past the ~1200-token split threshold, row-packed."""
     grid = [HEADER_ROW]
     for i in range(1, n_rows + 1):
         note = f"Note {i:03d} " + "segment detail " * 8
@@ -87,9 +58,6 @@ def _big_table(n_rows: int = 200) -> str:
 
 BIG_TABLE = _big_table()
 
-# --- documents -------------------------------------------------------------------
-# Mirrors the shape the parser produces for tests/fixtures.py::sample_doc(), so the
-# chunking invariants are exercised on realistic block structure without a PDF.
 
 SAMPLE_DOC = _doc(
     Block(
@@ -118,10 +86,8 @@ PROSE = "\n\n".join(
     for i in range(1, 46)
 )
 
-# One ~900-token section: long enough that the parent must split into children.
 PROSE_DOC = _doc(Block("text", "SEGMENT DISCUSSION\n" + PROSE, 1, ("SEGMENT DISCUSSION",)))
 
-# Same section, two pages: a merged parent must carry the whole page range.
 CROSS_PAGE_DOC = _doc(
     Block("text", "SUMMARY\nRevenue grew across segments in fiscal 2023.", 1, ("SUMMARY",)),
     Block("text", "Operating income expanded year over year as well.", 2, ("SUMMARY",)),
@@ -137,16 +103,11 @@ def sample_pdf(tmp_path: Path) -> Path:
     return path
 
 
-# --- helpers ---------------------------------------------------------------------
-
-
 def _table_lines(text: str) -> list[str]:
-    """Markdown table lines inside a chunk text (header, separator and data rows)."""
     return [line.strip() for line in text.splitlines() if line.strip().startswith("|")]
 
 
 def _assert_no_partial_row(text: str, table_lines: set[str]) -> None:
-    """Every table-looking line in a chunk must be a whole row of the source table."""
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("|"):
@@ -154,7 +115,6 @@ def _assert_no_partial_row(text: str, table_lines: set[str]) -> None:
 
 
 def _shared_span(before: str, after: str, window: int = 2000) -> str:
-    """Longest block shared by the tail of `before` and the head of `after`."""
     tail, head = before[-window:], after[:window]
     matcher = difflib.SequenceMatcher(None, tail, head, autojunk=False)
     match = matcher.find_longest_match(0, len(tail), 0, len(head))
@@ -163,9 +123,6 @@ def _shared_span(before: str, after: str, window: int = 2000) -> str:
 
 def _parent_order(parents: tuple[ParentChunk, ...]) -> dict[str, int]:
     return {parent.parent_id: index for index, parent in enumerate(parents)}
-
-
-# --- linkage and shape -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -195,7 +152,6 @@ def test_every_parent_owns_at_least_one_child() -> None:
 
 
 def test_parents_are_section_aligned() -> None:
-    """A new section starts a new parent; consecutive same-section blocks merge."""
     parents, _ = chunk_document(SAMPLE_DOC)
     assert [parent.section_path for parent in parents] == [
         SECTION_AR,
@@ -215,9 +171,6 @@ def test_child_chunks_carry_the_parent_page_section_and_doc_id() -> None:
         assert isinstance(child.ordinal, int) and child.ordinal >= 0
 
 
-# --- page provenance (STRESS-TEST-RAG row 5) --------------------------------------
-
-
 def test_parent_page_range_is_ordered_and_non_empty() -> None:
     for doc in ALL_DOCS:
         parents, _ = chunk_document(doc)
@@ -228,7 +181,6 @@ def test_parent_page_range_is_ordered_and_non_empty() -> None:
 
 
 def test_no_block_page_is_lost() -> None:
-    """Every block's page must stay reachable through its own section's parents."""
     for doc in (SAMPLE_DOC, BIG_TABLE_DOC, CROSS_PAGE_DOC):
         parents, _ = chunk_document(doc)
         for block in doc.blocks:
@@ -251,9 +203,6 @@ def test_same_section_text_blocks_merge_across_pages() -> None:
     assert "Operating income expanded" in parent.text
 
 
-# --- table atomicity (STRESS-TEST-RAG row 4) --------------------------------------
-
-
 def test_table_block_is_never_split_across_parents() -> None:
     parents, _ = chunk_document(SAMPLE_DOC)
     header, separator, *rows = SMALL_TABLE.splitlines()
@@ -273,7 +222,6 @@ def test_table_block_is_never_split_across_parents() -> None:
 
 
 def test_parsed_pdf_table_stays_whole(sample_pdf: Path) -> None:
-    """The same invariant on real parser output, not a hand-built document."""
     doc = parse_pdf(sample_pdf)
     parents, children = chunk_document(doc)
     table = next(block for block in doc.blocks if block.kind == "table")
@@ -311,7 +259,6 @@ def test_large_table_splits_at_row_boundaries_and_repeats_the_header() -> None:
         assert separator in parent.text, "continuation lost the separator row"
         _assert_no_partial_row(parent.text, set(BIG_TABLE.splitlines()))
 
-    # No row is dropped, reordered or duplicated across the continuations.
     order = _parent_order(parents)
     carried = [
         line
@@ -327,9 +274,6 @@ def test_has_table_flag_matches_table_content() -> None:
         parents, _ = chunk_document(doc)
         for parent in parents:
             assert bool(parent.has_table) is bool(_table_lines(parent.text))
-
-
-# --- children ---------------------------------------------------------------------
 
 
 def test_child_ordinals_are_zero_based_and_contiguous_per_parent() -> None:
@@ -353,7 +297,6 @@ def test_child_text_comes_from_its_parent_text() -> None:
 
 
 def test_long_parent_splits_into_overlapping_children() -> None:
-    """Child size ~250 tokens with ~50 tokens of overlap between neighbours."""
     _parents, children = chunk_document(PROSE_DOC)
     assert len(children) >= 3, "a ~900-token parent must split into several children"
 
@@ -370,9 +313,6 @@ def test_long_parent_splits_into_overlapping_children() -> None:
             assert _est_tokens(overlap) <= CHILD_OVERLAP_TOKENS * 2, "overlap too large"
 
 
-# --- determinism and degenerate input --------------------------------------------
-
-
 def test_chunking_is_deterministic_and_id_free() -> None:
     for doc in (SAMPLE_DOC, BIG_TABLE_DOC, PROSE_DOC):
         first = chunk_document(doc)
@@ -385,7 +325,6 @@ def test_chunking_is_deterministic_and_id_free() -> None:
         for child in children:
             assert child.chunk_id == f"{child.parent_id}-c{child.ordinal}"
 
-        # An equal-but-distinct document must produce the same ids: no randomness.
         assert chunk_document(_doc(*doc.blocks)) == first
 
 
