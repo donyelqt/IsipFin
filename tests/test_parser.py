@@ -1,5 +1,3 @@
-"""doc-ingest invariants (ADR-004, docs/TESTING-AND-EVAL.md)."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,9 +31,6 @@ def scanned(tmp_path: Path) -> Path:
     return p
 
 
-# --- cleaning (ADR-004 rule 4) ---------------------------------------------------
-
-
 def test_dehyphenation_joins_broken_word() -> None:
     assert clean_text("operat-\ning margin") == "operating margin"
 
@@ -46,16 +41,10 @@ def test_numbers_preserved_exactly_as_printed() -> None:
 
 
 def test_short_blocks_survive_cleaning_for_caller_to_drop() -> None:
-    # < 20 chars is the caller's drop rule, not cleaning's; cleaning is lossless here.
     assert clean_text("ok") == "ok"
 
 
 def test_standalone_page_numbers_dropped() -> None:
-    """Pagination must not become block content or masquerade as a heading.
-
-    Regression guard: the section-path test catches this indirectly, but only
-    when a heading exists; without one the footer silently became content.
-    """
     assert clean_text("page 12\nRevenue grew.") == "Revenue grew."
     assert clean_text("312\nRevenue grew.") == "Revenue grew."
 
@@ -63,9 +52,6 @@ def test_standalone_page_numbers_dropped() -> None:
 def test_page_number_inside_a_real_sentence_is_kept() -> None:
     text = "Revenue grew in page-3 segments by 12 percent."
     assert clean_text(text) == text
-
-
-# --- boilerplate (ADR-004 rule 1) ------------------------------------------------
 
 
 def test_repeated_header_detected_and_stripped() -> None:
@@ -78,9 +64,6 @@ def test_repeated_header_detected_and_stripped() -> None:
 def test_normal_body_line_is_not_boilerplate() -> None:
     pages = {1: "Revenue grew.", 2: "Revenue fell."}
     assert find_boilerplate(pages) == set()
-
-
-# --- headings (ADR-004 rule 3) ----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -99,23 +82,16 @@ def test_non_headings(line: str) -> None:
     assert not detect_heading(line)
 
 
-# --- table serialization (ADR-004 rules 2 and 5) ----------------------------------
-
-
 def test_table_to_markdown_keeps_header_and_pads_cells() -> None:
     md = table_to_markdown([["Metric", "FY2023", "FY2022"], ["Revenue", "$ 211,915"]])
     lines = md.splitlines()
     assert lines[0] == "| Metric | FY2023 | FY2022 |"
     assert lines[1].count("---") == 3
-    # Short row padded so the grid keeps its width.
     assert lines[2] == "| Revenue | $ 211,915 | — |"
 
 
 def test_empty_grid_serializes_to_empty_string() -> None:
     assert table_to_markdown([]) == ""
-
-
-# --- parse pipeline ----------------------------------------------------------------
 
 
 def test_page_count_and_one_based_pages(sample: Path) -> None:
@@ -163,7 +139,6 @@ def test_table_page_flag_rejects_plain_prose() -> None:
 def test_parse_error_carries_page_number(tmp_path: Path) -> None:
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(sample_doc())
-    # Truncated stream makes pypdf/pdfplumber raise; the error must not be swallowed.
     bad.write_bytes(bad.read_bytes()[:40])
     with pytest.raises(ParseError):
         parse_pdf(bad)
